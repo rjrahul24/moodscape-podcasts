@@ -1,0 +1,31 @@
+[project]
+name = "moodscape-podcasts-backend"
+version = "0.1.0"
+description = "Moodscape Podcasts backend — multi-speaker script to podcast audio via pluggable TTS providers."
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "httpx>=0.27",
+    "pydub>=0.25.1",
+    "python-multipart>=0.0.9",
+    # pydub relies on the stdlib `audioop` module, which was removed in Python 3.13.
+    # audioop-lts backports it for 3.13+ (this machine runs 3.14).
+    "audioop-lts; python_version >= '3.13'",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "respx>=0.21",
+]
+
+# Not an installable package — uv just manages the virtualenv + dependencies.
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
