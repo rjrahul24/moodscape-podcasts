@@ -22,11 +22,20 @@ output). This document is the current-state map — keep it updated (see
 
 ```
 moodscape-podcasts/
+  dev.sh        dev launcher: starts backend + frontend together, Ctrl-C stops both
   backend/      FastAPI app (Python 3.13, uv-managed)
   frontend/     React + TypeScript (Vite)
   assets/       F5 reference voices (tracked in git)
   docs/         this guide, CHANGELOG, design specs
 ```
+
+The app runs as two processes: the FastAPI backend on `:8000` and the Vite dev
+server on `:5173`, which proxies `/api` → `:8000` (see `frontend/vite.config.ts`)
+so the browser makes same-origin requests. `./dev.sh` launches both as child
+processes, streams their logs to one terminal, and tears the whole tree down on
+Ctrl-C (it kills each child's descendants via `pgrep -P`, since `uv`/`uvicorn`'s
+reload child and `npm`'s `vite` child don't forward signals). You can still run
+the two sides independently when you want isolated logs.
 
 The backend is pinned to **Python 3.13** because the local-TTS stack
 (Kokoro/F5 → spacy) has no cp314 wheels yet (`backend/.python-version`,

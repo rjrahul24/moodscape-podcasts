@@ -3,6 +3,32 @@
 Append-only log of notable changes and the decisions behind them. Newest first.
 Every change should add an entry (see `CLAUDE.md` → Documentation discipline).
 
+## 2026-06-15 — Single-command dev launcher (`dev.sh`)
+
+Added a root `dev.sh` so the app starts with one command instead of running the
+backend and frontend in two terminals. It launches `uv run uvicorn … --reload`
+and `npm run dev` as child processes, streams both logs to one terminal, and on
+Ctrl-C tears down the whole process tree.
+
+- **Why a script, not a new dependency.** The repo mixes Python (uv) and Node
+  (npm); a plain bash launcher needs nothing installed beyond what's already
+  there (no `concurrently`/root `package.json`). The frontend still proxies
+  `/api` → `:8000`, so nothing about the runtime topology changed — this is dev
+  ergonomics only.
+- **Teardown kills descendants, not just the tracked children.** `uvicorn`'s
+  `--reload` spawns a worker and `npm` spawns `vite`; neither forwards signals,
+  so killing the tracked parent alone orphans them (verified: orphaned listeners
+  left holding `:8000`/`:5173`). `dev.sh` recurses with `pgrep -P` and kills
+  leaves first. Confirmed clean teardown — no surviving processes, both ports
+  freed.
+- **macOS bash 3.2 compatibility.** Avoided `wait -n` (bash 4+) in favor of a
+  poll loop, and dropped a `set -m` process-group approach that was unreliable
+  in non-tty contexts.
+- **Note:** Ctrl-C in a real terminal triggers the trap correctly. Launching the
+  script with `&` from a non-interactive shell makes SIGINT un-trappable (POSIX
+  async-child rule), but that's a background-launch artifact, not the Ctrl-C
+  path; the trap also catches SIGTERM.
+
 ## 2026-06-15 — Async pipeline overhaul + Sleep Stories content type
 
 Two coordinated changes: a model-agnostic architecture overhaul that fixes

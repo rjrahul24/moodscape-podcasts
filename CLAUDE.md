@@ -45,15 +45,34 @@ docs/              ARCHITECTURE.md, CHANGELOG.md, specs/
 
 ## Run it
 
+The app is two processes — FastAPI backend (`:8000`) and Vite frontend (`:5173`,
+which proxies `/api` → `:8000`). Both must be running.
+
+**One-time install:**
+
+```bash
+cd backend  && cp .env.example .env && uv sync --extra dev  # ELEVENLABS_API_KEY if using ElevenLabs; deps multi-GB
+cd frontend && npm install
+```
+
+**Run both with one command** (from the repo root):
+
+```bash
+./dev.sh        # starts backend + frontend, streams both logs, Ctrl-C stops both
+```
+
+Then open http://localhost:5173. `dev.sh` keeps `--reload` / Vite hot-reload on
+both sides and tears the whole process tree down on Ctrl-C.
+
+**Run the sides separately** (isolated logs, or to restart one without the other):
+
 ```bash
 # Backend (from backend/)
-cp .env.example .env          # add ELEVENLABS_API_KEY / VOICE_CATALOG if using ElevenLabs
-uv sync --extra dev           # installs everything incl. torch/kokoro/f5 (multi-GB)
-uv run pytest                 # fast: uses fakes, no model downloads
-uv run uvicorn app.main:app --reload    # http://localhost:8000
+uv run pytest                            # fast: uses fakes, no model downloads
+uv run uvicorn app.main:app --reload     # http://localhost:8000
 
 # Frontend (from frontend/)
-npm install && npm run dev    # http://localhost:5173 (proxies /api → :8000)
+npm run dev                              # http://localhost:5173 (proxies /api → :8000)
 ```
 
 ## Key conventions (don't break these)

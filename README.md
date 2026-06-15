@@ -60,6 +60,23 @@ docs/       ARCHITECTURE.md, CHANGELOG.md, design specs
 
 ## Setup
 
+The app is two processes — a FastAPI backend (`:8000`) and a Vite frontend
+(`:5173`) that proxies `/api` to the backend. Both need to be running.
+
+### One command (recommended)
+
+After the one-time installs below (`uv sync` and `npm install`), start both at
+once from the repo root:
+
+```bash
+./dev.sh        # starts backend + frontend, streams both logs, Ctrl-C stops both
+```
+
+Then open http://localhost:5173. The script keeps `--reload` on the backend and
+Vite's hot-reload on the frontend, and tears both down together on Ctrl-C. Run
+the two sides separately (below) only when you want isolated logs or to restart
+one without the other.
+
 ### Backend
 
 ```bash
