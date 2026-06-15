@@ -1,86 +1,26 @@
-"""Orchestrates a generation job: parse -> synthesize per turn -> stitch -> export.
+"""Legacy synchronous entry point.
 
-Pure-ish: depends only on settings + the provider registry, so it can be driven
-from the API or from a test with a fake provider.
+The real generation logic now lives in :mod:`app.core.orchestrator` (async-job
+aware, chunked, disk-stitched). ``generate`` is kept as a thin adapter so the
+existing ``POST /api/generate`` endpoint and its tests keep working: it maps the
+legacy ``GenerateRequest`` onto a ``PodcastRequest`` and runs the orchestrator
+synchronously with no progress reporting.
 """
 
 from __future__ import annotations
 
 from app.config import Settings
-from app.providers import registry
-from app.storage import files
 
-from .errors import VoiceAssignmentError
-from .models import (
-    GeneratedFile,
-    GenerateRequest,
-    GenerateResult,
-    SegmentInfo,
-)
-from .script_parser import distinct_speakers, parse_script
-from .stitcher import export_master, stitch
+from . import orchestrator
+from .models import GenerateRequest, GenerateResult, PodcastRequest
 
 
 def generate(request: GenerateRequest, settings: Settings) -> GenerateResult:
     """Render ``request`` into a stitched episode and return its metadata."""
-    turns = parse_script(request.script_text)
-
-    # Every speaker used in the script must have a voice assigned.
-    missing = [s for s in distinct_speakers(turns) if s not in request.speakers]
-    if missing:
-        raise VoiceAssignmentError(
-            "No voice assigned for: " + ", ".join(missing) + "."
-        )
-
-    output_format = request.output_format or settings.segment_output_format
-    gap_ms = request.gap_ms if request.gap_ms is not None else settings.inter_turn_gap_ms
-
-    segments = []
-    segment_infos: list[SegmentInfo] = []
-    for turn in turns:
-        assignment = request.speakers[turn.speaker]
-        provider = registry.get(assignment.provider)
-        segment = provider.synthesize(
-            turn.text, assignment.voice_id, output_format=output_format
-        )
-        segments.append(segment)
-        segment_infos.append(
-            SegmentInfo(
-                index=turn.index,
-                speaker=turn.speaker,
-                voice_id=assignment.voice_id,
-                provider=assignment.provider,
-                duration_ms=len(segment),
-            )
-        )
-
-    episode = stitch(
-        segments, gap_ms, target_sample_rate=settings.target_sample_rate
+    podcast = PodcastRequest(
+        script_text=request.script_text,
+        speakers=request.speakers,
+        output_format=request.output_format,
+        gap_ms=request.gap_ms,
     )
-
-    job_id = files.new_job_id()
-    out_dir = files.job_dir(settings.output_dir, job_id)
-    written = export_master(
-        episode,
-        out_dir,
-        files.EPISODE_BASENAME,
-        final_format=settings.final_format,
-        also_export_mp3=settings.also_export_mp3,
-    )
-
-    generated_files = [
-        GeneratedFile(
-            filename=path.name,
-            format=path.suffix.lstrip("."),
-            download_url=f"/api/download/{job_id}/{path.name}",
-            size_bytes=path.stat().st_size,
-        )
-        for path in written
-    ]
-
-    return GenerateResult(
-        job_id=job_id,
-        duration_ms=len(episode),
-        segments=segment_infos,
-        files=generated_files,
-    )
+    return orchestrator.run(podcast, settings)

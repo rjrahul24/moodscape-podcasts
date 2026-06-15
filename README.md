@@ -1,10 +1,16 @@
-# 🎙️ Moodscape Podcasts
+# 🎙️ Moodscape Studio
 
-Turn a written multi-speaker script into a finished podcast episode. Paste a
-script, assign a **model + voice** to each speaker, and the app renders every
-line, stitches them into one episode, and hands you a downloadable audio file.
+Turn pasted text into finished mindfulness audio. Two content types:
 
-**Three TTS models, pickable per speaker** (mix them in one episode):
+- **🎙️ Podcasts** — a multi-speaker script; assign a **model + voice** to each
+  speaker and the app renders every line into one stitched episode.
+- **🌙 Sleep Stories** — paste a full story as plain prose, pick one calming
+  voice, and get a sleep-optimized episode: slower pace, gentle inter-sentence
+  pauses, loudness normalization, soft EQ/compression, fades, and an optional
+  ambient bed — exported 44.1 kHz **stereo**.
+
+**Three TTS models, pickable per speaker/voice** (podcasts can mix them in one
+episode):
 
 | Model | Type | Voices |
 | --- | --- | --- |
@@ -13,15 +19,21 @@ line, stitches them into one episode, and hands you a downloadable audio file.
 | **F5** | Local | Zero-shot voice cloning from your own reference clips |
 
 Providers are pluggable behind a single `TTSProvider` interface — new ones drop
-in without touching the parser, engine, API, or frontend (see
+in without touching the parser, orchestrator, API, or frontend (see
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)).
 
+Generation is **async**: the frontend gets a `job_id`, then streams live progress
+over SSE while the backend chunks the text, synthesizes each chunk to disk, and
+stitches with the ffmpeg concat demuxer (so 30–45 min sleep stories don't time
+out or exhaust memory).
+
 ```
-┌──────────┐    [Speaker N]: …     ┌───────────────────────────────┐
+┌──────────┐   POST /api/jobs      ┌───────────────────────────────┐
 │ Frontend │ ────────────────────▶ │ FastAPI backend               │
-│ (React)  │   POST /api/generate  │  parse → synth per turn →      │
-│          │ ◀──────────────────── │  normalize → stitch → WAV/MP3  │
-└──────────┘    episode + files    └───────────────────────────────┘
+│ (React)  │   {job_id}            │  chunk → synth per chunk →     │
+│          │ ◀─ SSE progress ───── │  ffmpeg concat → (sleep:       │
+│          │ ◀── episode + files── │  loudnorm/EQ/ambient) → WAV/MP3│
+└──────────┘                       └───────────────────────────────┘
                                           │ TTSProvider (registry)
                                           ▼
                                   ElevenLabs · Kokoro · F5
@@ -30,9 +42,9 @@ in without touching the parser, engine, API, or frontend (see
 ## Layout
 
 ```
-backend/    FastAPI app, TTS provider abstraction, audio engine, tests
+backend/    FastAPI app, TTS provider abstraction, async orchestrator, tests
 frontend/   React + TypeScript (Vite) UI
-assets/     F5 reference voices (reference_audio/*.wav + reference_text/*.txt)
+assets/     F5 reference voices (speakers/) + sleep ambient beds (ambient/)
 docs/       ARCHITECTURE.md, CHANGELOG.md, design specs
 ```
 
@@ -70,7 +82,10 @@ Key `.env` settings:
 | `VOICE_CATALOG` | JSON list of voices for the dropdown, e.g. `[{"id":"...","label":"Rachel"}]`. Empty `[]` offers every voice on the account. |
 | `SEGMENT_OUTPUT_FORMAT` | Per-segment format requested from the provider. Best quality (Pro tier): `wav_44100`. Any tier: `mp3_44100_128`. |
 | `FINAL_FORMAT` | Master export format: `wav` (lossless) or `mp3`. |
-| `INTER_TURN_GAP_MS` | Silence between speaker turns. |
+| `INTER_TURN_GAP_MS` | Silence between speaker turns (podcasts). |
+| `KOKORO_CHUNK_CHARS` / `F5_CHUNK_CHARS` / `ELEVENLABS_CHUNK_CHARS` | Max characters per synthesis chunk (keeps Kokoro under its token cap, F5 under ~30s). |
+| `SLEEP_DEFAULT_SPEED` / `SLEEP_DEFAULT_PAUSE_MS` | Sleep-story defaults (overridable per request in the UI). |
+| `SLEEP_TARGET_LUFS` / `SLEEP_LOWPASS_HZ` / `SLEEP_FADE_*` / `AMBIENT_BED_GAIN_DB` | Sleep mastering: loudness target, EQ roll-off, fades, ambient level. |
 
 ### Frontend
 
@@ -80,8 +95,40 @@ npm install
 npm run dev                   # serves on http://localhost:5173 (proxies /api → :8000)
 ```
 
-Open http://localhost:5173, pick the number of speakers, choose a **model and
-voice** for each, paste your script, and click **Generate podcast**.
+Open http://localhost:5173 and choose a content type at the top:
+
+- **Podcast** — pick the number of speakers, choose a **model and voice** for
+  each, paste your `[Speaker N]:` script, and click **Generate podcast**.
+- **Sleep Story** — pick one **model and voice**, set the **speed** and
+  **inter-sentence pause**, optionally choose an **ambient bed**, paste your
+  story as plain prose, and click **Generate sleep story**.
+
+Either way a progress bar tracks the job live until the player + download links
+appear.
+
+## Sleep Stories
+
+Sleep stories are single-speaker and take **plain prose** (no `[Speaker]` tags).
+A warm Kokoro voice such as `af_heart` at speed ~0.85 works well. The backend
+applies a calming master — narrowed dynamics, gentle high-frequency roll-off,
+EBU R128 loudness normalization, slow fades — and exports **44.1 kHz stereo**.
+Rough lengths: a 30-min story is ~2,700–3,300 words; 45 min is ~4,000–5,000.
+
+To layer an ambient soundscape under the narration, drop audio files in
+`assets/ambient/` (see below) and pick one from the **Ambient bed** dropdown.
+
+> This calming treatment applies to **sleep stories only** — podcasts are never
+> processed (a deliberate project rule; see `CLAUDE.md`).
+
+## Adding ambient beds (sleep stories)
+
+```
+assets/ambient/<name>.wav     # or .mp3 — a short seamless loop is fine
+```
+
+The bed is looped/trimmed to the story length, pulled well under the voice, and
+faded. Restart the backend and it appears in the ambient picker. See
+[assets/ambient/README.md](assets/ambient/README.md).
 
 ## Adding F5 voices (cloning)
 
@@ -110,11 +157,11 @@ the UI. Inline provider tags like `[excited]` are passed through to the provider
 
 ## Output quality
 
-Each turn is rendered in the configured `SEGMENT_OUTPUT_FORMAT` (use lossless
-`wav_44100` on a Pro+ account for best results), stitched losslessly to avoid
-recompression artifacts, and exported as a **WAV master** plus an optional
-**MP3 320** for sharing. (MP4 is a video container and isn't used for audio-only
-podcasts.)
+Each chunk is rendered in the configured `SEGMENT_OUTPUT_FORMAT` (use lossless
+`wav_44100` on a Pro+ account for best results), written to disk, and stitched
+with the ffmpeg concat demuxer (constant memory) into a **WAV master** plus an
+optional **MP3 320** for sharing. Sleep stories add a calming master and export
+44.1 kHz stereo. (MP4 is a video container and isn't used for audio-only output.)
 
 ## Adding a new TTS provider
 

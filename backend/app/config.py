@@ -66,6 +66,25 @@ class Settings(BaseSettings):
     f5_cfg_strength: float = 2.0
     f5_sway_coef: float = -1.0
 
+    # Per-provider chunk budgets (characters). Long text is split into bounded
+    # chunks before synthesis so Kokoro stays under its 510 phoneme-token cap and
+    # F5 stays within ~30s/pass. See core/chunker.py for the char-vs-token note.
+    kokoro_chunk_chars: int = 400
+    f5_chunk_chars: int = 350
+    elevenlabs_chunk_chars: int = 2400
+
+    # Sleep stories (single-speaker, calming treatment — NOT applied to podcasts).
+    sleep_default_speed: float = 0.85
+    sleep_default_pause_ms: int = 900  # inter-sentence silence
+    sleep_sample_rate: int = 44100
+    sleep_channels: int = 2  # sleep masters are stereo
+    sleep_target_lufs: float = -20.0  # EBU R128 integrated loudness target
+    sleep_lowpass_hz: int = 8000  # gentle high-frequency roll-off
+    sleep_fade_in_s: float = 2.0
+    sleep_fade_out_s: float = 5.0
+    ambient_bed_gain_db: float = -22.0  # how far under the narration the bed sits
+    ambient_dir: Path = _DEFAULT_ASSETS_DIR / "ambient"
+
     # Voice catalog (empty -> offer all account voices)
     voice_catalog: list[VoiceCatalogEntry] = Field(default_factory=list)
 

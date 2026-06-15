@@ -46,3 +46,54 @@ export interface GenerateResult {
   segments: SegmentInfo[];
   files: GeneratedFile[];
 }
+
+// ── Async jobs (POST /api/jobs) ──────────────────────────────────────────────
+
+export type ContentType = "podcast" | "sleep_story";
+
+export interface PodcastJobRequest {
+  kind: "podcast";
+  script_text: string;
+  speakers: Record<string, SpeakerVoice>;
+  output_format?: string | null;
+  gap_ms?: number | null;
+}
+
+export interface SleepStoryJobRequest {
+  kind: "sleep_story";
+  prose_text: string;
+  provider: string;
+  voice_id: string;
+  speed?: number | null;
+  pause_ms?: number | null;
+  ambient_bed?: string | null;
+}
+
+export type JobRequest = PodcastJobRequest | SleepStoryJobRequest;
+
+export interface JobCreated {
+  job_id: string;
+}
+
+export type JobStatus = "queued" | "running" | "succeeded" | "failed";
+
+export interface JobProgress {
+  status: JobStatus;
+  progress: number; // 0.0 .. 1.0
+  step: string;
+  chunks_total: number;
+  chunks_done: number;
+  detail?: string | null;
+}
+
+export interface JobView {
+  job_id: string;
+  kind: ContentType;
+  progress: JobProgress;
+  result: GenerateResult | null;
+}
+
+export interface AmbientBed {
+  id: string;
+  name: string;
+}

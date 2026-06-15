@@ -29,8 +29,10 @@ def fake_kokoro(monkeypatch):
     class FakeKPipeline:
         def __init__(self, **kwargs):
             self.kwargs = kwargs
+            self.last_speed = None
 
         def __call__(self, text, voice, speed, split_pattern):
+            self.last_speed = speed
             sr = 24000
             audio = np.zeros(int(sr * 0.5), dtype=np.float32)
             yield ("graphemes", "phonemes", audio)
@@ -55,3 +57,17 @@ def test_british_voice_uses_lang_code_b(fake_kokoro):
     assert provider._pipeline_gb is not None
     assert provider._pipeline_gb.kwargs["lang_code"] == "b"
     assert provider._pipeline_us is None
+
+
+def test_default_speed_used_when_no_voice_settings(fake_kokoro):
+    provider = KokoroProvider(speed=1.0)
+    provider.synthesize("hi", "af_heart", output_format="ignored")
+    assert provider._pipeline_us.last_speed == 1.0
+
+
+def test_voice_settings_speed_overrides_default(fake_kokoro):
+    provider = KokoroProvider(speed=1.0)
+    provider.synthesize(
+        "hi", "af_heart", output_format="ignored", voice_settings={"speed": 0.85}
+    )
+    assert provider._pipeline_us.last_speed == 0.85

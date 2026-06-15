@@ -68,12 +68,14 @@ class F5Provider(TTSProvider):
         model = self._get_model()
         ref = self._get_reference(voice_id)
 
+        # Per-job speed rides voice_settings (sleep stories); default otherwise.
+        speed = (voice_settings or {}).get("speed", self._speed)
         try:
             wav, _sr, _ = model.infer(
                 ref_file=ref["audio"],
                 ref_text=ref["text"],
                 gen_text=" ".join(text.split()),
-                speed=self._speed,
+                speed=speed,
                 nfe_step=self._nfe_step,
                 cfg_strength=self._cfg_strength,
                 sway_sampling_coef=self._sway_coef,

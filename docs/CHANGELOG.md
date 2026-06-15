@@ -3,6 +3,76 @@
 Append-only log of notable changes and the decisions behind them. Newest first.
 Every change should add an entry (see `CLAUDE.md` → Documentation discipline).
 
+## 2026-06-15 — Async pipeline overhaul + Sleep Stories content type
+
+Two coordinated changes: a model-agnostic architecture overhaul that fixes
+long-content generation, and a net-new **Sleep Stories** content type.
+
+### Architecture overhaul (both content types)
+
+- **Async jobs.** New `POST /api/jobs` (discriminated `podcast`/`sleep_story`
+  body) returns a `job_id` immediately; work runs in a single-slot thread pool
+  (`max_workers=1`) off the event loop. Progress via SSE
+  (`GET /api/jobs/{id}/events`, `sse-starlette`) and polling
+  (`GET /api/jobs/{id}`). The legacy synchronous `POST /api/generate` stays as a
+  thin adapter over the new orchestrator, so existing callers/tests are unaffected.
+- **Per-provider chunking** (`core/chunker.py`): sentence-aware, character-based
+  budgets (Kokoro 400 / F5 350 / ElevenLabs 2400) keep each call under Kokoro's
+  510 phoneme-token cap and F5's ~30s/pass. Pure module, no ML imports.
+- **Disk-based stitching** (`core/ffmpeg_stitch.py`): each chunk is written to a
+  temp WAV and concatenated with the ffmpeg concat demuxer — constant memory, no
+  `MemoryError` on 30–45 min output. Replaces in-memory pydub concat on the async
+  path (`stitcher.stitch` retained for the legacy path + its tests).
+- **`engine.generate` is now a shim** over `core/orchestrator.run`, the single
+  generation engine for both content types.
+
+### Sleep Stories (single-speaker, plain prose)
+
+- New `SleepStoryRequest`: paste plain prose (no `[Speaker]` tags), one
+  provider + voice, with `speed` (default 0.85), inter-sentence `pause_ms`
+  (default 900), and an optional ambient bed.
+- **Calming post-processing** (`core/sleep_post.py`, ffmpeg): gentle compression
+  → low-pass roll-off → EBU R128 `loudnorm` → fade in/out → **44.1 kHz stereo**.
+- **Ambient beds** (`core/ambient.py` + `storage/ambient_registry.py`): files in
+  `assets/ambient/*.{wav,mp3}` are looped/trimmed to the story length, pulled
+  ~22 dB under the voice, faded, and `amix`ed under the narration. Listed at
+  `GET /api/ambient`.
+- **Per-job speed** rides the existing `voice_settings` dict — `KokoroProvider`
+  and `F5Provider` read `voice_settings["speed"]` (one-line change each), so the
+  `TTSProvider` signature is unchanged and ElevenLabs never receives the key.
+
+### Frontend
+
+- Content-type toggle (`ContentTypeSelector`); Sleep config (`SleepStoryConfig`:
+  single voice, speed/pause sliders, ambient picker, prose textarea with
+  word-count/duration hint); live `ProgressBar` driven by the SSE stream
+  (`api/jobs.ts`). Podcasts reuse `SpeakerConfig`/`ScriptInput` and now also run
+  through the async job flow.
+
+### Decisions / trade-offs
+
+- **Sanctioned exception to "no meditation processing."** The rule still holds
+  for podcasts; the calming treatment applies to sleep stories only. CLAUDE.md
+  updated to record the boundary.
+- **No model-lineup changes** (no Chatterbox, no F5 demotion); Kokoro's
+  CPU-on-Apple-Silicon default is kept and documented.
+- **Char-based chunk budgets** instead of "tokens": Kokoro's limit is phonemized
+  tokens, which track characters, not BPE tokens — char budgets are safe and need
+  no tokenizer dependency.
+- **Concurrency capped at 1** so two heavy local models never co-load (OOM guard);
+  parallel jobs are serialized.
+- **In-memory job store** (no DB): single-user local app; jobs clear on restart,
+  output files persist for download.
+
+### Docs & testing
+
+- Added `sse-starlette`; new sleep/chunking/ambient config in `config.py` +
+  `.env.example`; `assets/ambient/` scaffold + README.
+- Tests: 39 → 77 (chunker, job store, orchestrator podcast+sleep, jobs API incl.
+  SSE, ambient registry, sleep filtergraph, per-job speed threading). No model
+  downloads; real-ffmpeg tests gated on ffmpeg presence.
+- Updated `ARCHITECTURE.md`, `README.md`, `CLAUDE.md`, and added a design spec.
+
 ## 2026-06-15 — Add Kokoro + F5 TTS providers
 
 Added two local TTS models behind the existing provider abstraction so a user

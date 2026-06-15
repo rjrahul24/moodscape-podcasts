@@ -14,12 +14,22 @@ class FakeProvider(TTSProvider):
         self._duration_ms = duration_ms
         self._sample_rate = sample_rate
         self.calls: list[tuple[str, str]] = []
+        # Full call records including voice_settings (for per-job speed assertions).
+        self.synth_calls: list[dict] = []
 
     def list_voices(self) -> list[Voice]:
         return [Voice(id=f"{self.name}-v1", name="Fake Voice", provider=self.name)]
 
     def synthesize(self, text, voice_id, *, output_format, voice_settings=None) -> AudioSegment:
         self.calls.append((voice_id, text))
+        self.synth_calls.append(
+            {
+                "text": text,
+                "voice_id": voice_id,
+                "output_format": output_format,
+                "voice_settings": voice_settings,
+            }
+        )
         return AudioSegment.silent(
             duration=self._duration_ms, frame_rate=self._sample_rate
         )

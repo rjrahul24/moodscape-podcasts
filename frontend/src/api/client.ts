@@ -1,6 +1,6 @@
 import type { GenerateRequest, GenerateResult, ProviderVoices } from "../types";
 
-async function parseError(response: Response): Promise<string> {
+export async function parseError(response: Response): Promise<string> {
   try {
     const body = await response.json();
     if (typeof body.detail === "string") return body.detail;

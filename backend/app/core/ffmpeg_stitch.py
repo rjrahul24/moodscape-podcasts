@@ -1,0 +1,107 @@
+"""Disk-based audio stitching via the ffmpeg concat demuxer.
+
+The original in-memory pydub path (``stitcher.stitch``) loads the entire episode
+into RAM and reallocates on every concatenation — fine for short podcasts, but a
+40+ min stereo master is hundreds of MB per copy and risks ``MemoryError``.
+
+Here each chunk is written to its own WAV on disk, then concatenated with
+``ffmpeg -f concat`` which streams the inputs and uses constant memory regardless
+of episode length. We still use ``stitcher.numpy_to_segment`` /
+``bytes_to_segment`` to turn provider output into an ``AudioSegment``, but write
+it straight to disk instead of holding the whole episode in memory.
+"""
+
+from __future__ import annotations
+
+import subprocess
+from pathlib import Path
+
+from pydub import AudioSegment
+
+from .errors import AudioProcessingError
+
+
+def run_ffmpeg(args: list[str]) -> None:
+    """Run ``ffmpeg`` with ``args`` (auto-prefixed), raising on a non-zero exit."""
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", *args]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+    except FileNotFoundError as exc:  # ffmpeg not on PATH
+        raise AudioProcessingError("ffmpeg not found on PATH") from exc
+    if proc.returncode != 0:
+        raise AudioProcessingError(
+            f"ffmpeg failed ({proc.returncode}): {proc.stderr.strip()[:500]}"
+        )
+
+
+def segment_to_wav_file(
+    segment: AudioSegment,
+    path: Path,
+    *,
+    sample_rate: int,
+    channels: int = 1,
+) -> Path:
+    """Normalize ``segment`` to ``sample_rate``/``channels`` and write a WAV.
+
+    Normalizing every chunk to the same rate + channel count before concat is
+    what lets a single master freely mix providers with different native rates
+    (ElevenLabs up to 44.1 kHz, local models 24 kHz).
+    """
+    seg = segment.set_frame_rate(int(sample_rate)).set_channels(int(channels))
+    seg.export(path, format="wav")
+    return path
+
+
+def silence_wav(
+    path: Path,
+    *,
+    duration_ms: int,
+    sample_rate: int,
+    channels: int = 1,
+) -> Path:
+    """Write a silent WAV of ``duration_ms`` (used for gaps / inter-sentence pauses)."""
+    seg = AudioSegment.silent(duration=max(duration_ms, 0), frame_rate=int(sample_rate))
+    return segment_to_wav_file(seg, path, sample_rate=sample_rate, channels=channels)
+
+
+def build_concat_list(paths: list[Path], list_file: Path) -> Path:
+    """Write an ffmpeg concat-demuxer manifest listing ``paths`` in order."""
+    lines = []
+    for p in paths:
+        # ffmpeg concat: single-quote the path and escape embedded quotes.
+        safe = str(p.resolve()).replace("'", r"'\''")
+        lines.append(f"file '{safe}'")
+    list_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return list_file
+
+
+def concat(list_file: Path, out_wav: Path) -> Path:
+    """Concatenate the WAVs in ``list_file`` into ``out_wav`` (re-encoded PCM).
+
+    We re-encode rather than ``-c copy`` so mixed inputs are guaranteed to share
+    a stream layout; inputs are already normalized by ``segment_to_wav_file``.
+    """
+    run_ffmpeg(
+        [
+            "-f", "concat",
+            "-safe", "0",
+            "-i", str(list_file.resolve()),
+            "-c:a", "pcm_s16le",
+            str(out_wav.resolve()),
+        ]
+    )
+    return out_wav
+
+
+def transcode_mp3(in_wav: Path, out_mp3: Path, *, bitrate: str = "320k") -> Path:
+    """Transcode a WAV master to MP3."""
+    run_ffmpeg(["-i", str(in_wav.resolve()), "-b:a", bitrate, str(out_mp3.resolve())])
+    return out_mp3
+
+
+def transcode(in_path: Path, out_path: Path, *, final_format: str) -> Path:
+    """Transcode ``in_path`` to ``out_path`` in ``final_format`` (wav/mp3/...)."""
+    if final_format == "mp3":
+        return transcode_mp3(in_path, out_path)
+    run_ffmpeg(["-i", str(in_path.resolve()), str(out_path.resolve())])
+    return out_path

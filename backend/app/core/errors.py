@@ -26,3 +26,11 @@ class ProviderError(RuntimeError):
 
 class ProviderNotFoundError(KeyError):
     """No provider is registered under the requested name."""
+
+
+class AudioProcessingError(RuntimeError):
+    """An ffmpeg subprocess (stitch, post-process, ambient mix) failed."""
+
+
+class AmbientBedError(ValueError):
+    """The requested ambient bed slug was not found in the ambient assets."""

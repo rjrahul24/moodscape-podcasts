@@ -65,10 +65,13 @@ class KokoroProvider(TTSProvider):
         voice_settings: dict | None = None,
     ) -> AudioSegment:
         pipe = self._get_pipeline(voice_id)
+        # Per-job speed (e.g. sleep stories at ~0.85) rides voice_settings so the
+        # provider contract is unchanged; falls back to the configured default.
+        speed = (voice_settings or {}).get("speed", self._speed)
         try:
             chunks: list[np.ndarray] = []
             for _graphemes, _phonemes, audio in pipe(
-                text, voice=voice_id, speed=self._speed, split_pattern=""
+                text, voice=voice_id, speed=speed, split_pattern=""
             ):
                 if audio is None:
                     continue

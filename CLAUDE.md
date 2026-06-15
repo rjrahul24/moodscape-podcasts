@@ -4,10 +4,23 @@ Guidance for any agent or contributor working in this repo. Read this first.
 
 ## What this is
 
-A local, single-user full-stack web app that turns a pasted multi-speaker script
-into one downloadable podcast episode via text-to-speech. **Mindfulness-themed
-podcasts — NOT guided meditations.** Do not add meditation-style processing
-(silence padding, breath sounds, VAD, tone shaping, presets).
+A local, single-user full-stack web app that turns pasted text into finished
+mindfulness audio. Two content types:
+
+- **Podcasts** — a multi-speaker script → one downloadable episode.
+  **Mindfulness-themed podcasts — NOT guided meditations.** Do NOT add
+  meditation-style processing (silence padding, breath sounds, VAD, tone
+  shaping, presets) to podcasts.
+- **Sleep Stories** — single-speaker plain prose → a calming, sleep-optimized
+  episode. This content type has a **sanctioned exception** to the no-processing
+  rule: slower pace, inter-sentence pauses, EBU R128 loudness normalization,
+  gentle EQ/compression, fades, and an optional ambient bed (44.1 kHz stereo),
+  living in `core/sleep_post.py` + `core/ambient.py`. Applied **only** to sleep
+  stories — never to podcasts.
+
+Generation is async: `POST /api/jobs` returns a `job_id`; progress streams over
+SSE (`GET /api/jobs/{id}/events`). Long text is chunked per provider and stitched
+on disk via the ffmpeg concat demuxer.
 
 - **Backend:** FastAPI (Python), in `backend/`. Managed with `uv`. Pinned to
   **Python 3.13** (`.python-version`) — the local-TTS stack (Kokoro/F5 → spacy)
@@ -19,12 +32,14 @@ podcasts — NOT guided meditations.** Do not add meditation-style processing
 
 ```
 backend/app/
-  api/routes/      health, voices (provider-grouped), generate + download
-  core/            models, script_parser, engine, stitcher, errors
+  api/routes/      health, voices, generate+download, jobs (async+SSE), ambient
+  core/            models, script_parser, chunker, orchestrator, jobs,
+                   ffmpeg_stitch, sleep_post, ambient, engine (shim), stitcher, errors
   providers/       base (TTSProvider), registry, bootstrap, <provider>_provider.py
-  storage/         per-job output files
-frontend/src/      api client, types, components, App
+  storage/         per-job output files (files.py), ambient_registry.py
+frontend/src/      api client + jobs, types, components, App
 assets/speakers/   F5 reference voices: reference_audio/*.wav + reference_text/*.txt
+assets/ambient/    sleep-story ambient beds: *.wav | *.mp3
 docs/              ARCHITECTURE.md, CHANGELOG.md, specs/
 ```
 
@@ -52,12 +67,17 @@ npm install && npm run dev    # http://localhost:5173 (proxies /api → :8000)
   failures surface as `ProviderError` and a per-provider `error` in `/api/voices`.
 - **The provider registry is the extension point.** Add a provider by writing a
   `TTSProvider` subclass and registering it in `providers/bootstrap.py`. The
-  parser, engine, stitcher, API, and frontend should not need changes.
-- **No meditation processing.** Copy only the core text→audio path from any
-  reference implementation.
+  parser, orchestrator, stitcher, API, and frontend should not need changes.
+- **Per-job tuning rides `voice_settings`.** Don't change the `synthesize`
+  signature for per-job params — pass them in the `voice_settings` dict (today:
+  `speed`, read by Kokoro/F5). The orchestrator injects `speed` only for local
+  providers; chunking and pauses stay in the orchestrator, never in providers.
+- **No meditation processing on podcasts.** Copy only the core text→audio path
+  from any reference implementation. The calming treatment is allowed **only**
+  for the Sleep Stories content type (`core/sleep_post.py`, `core/ambient.py`).
 
 See `docs/ARCHITECTURE.md` for the full picture and runbooks ("add a provider",
-"add an F5 voice").
+"add an F5 voice", "add an ambient bed").
 
 ## Documentation discipline (MANDATORY — applies every session)
 
