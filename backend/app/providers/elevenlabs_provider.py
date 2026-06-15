@@ -10,9 +10,11 @@ we depend on is explicit:
 from __future__ import annotations
 
 import httpx
+from pydub import AudioSegment
 
 from app.core.errors import ProviderError
 from app.core.models import Voice
+from app.core.stitcher import bytes_to_segment
 
 from .base import TTSProvider
 
@@ -81,7 +83,7 @@ class ElevenLabsProvider(TTSProvider):
             for item in payload.get("voices", [])
         ]
 
-    def synthesize(
+    def synthesize_bytes(
         self,
         text: str,
         voice_id: str,
@@ -89,6 +91,7 @@ class ElevenLabsProvider(TTSProvider):
         output_format: str,
         voice_settings: dict | None = None,
     ) -> bytes:
+        """Request encoded audio bytes from the ElevenLabs API."""
         body: dict = {"text": text, "model_id": self._model_id}
         if voice_settings:
             body["voice_settings"] = voice_settings
@@ -106,3 +109,16 @@ class ElevenLabsProvider(TTSProvider):
 
         self._raise_for_status(response, f"Synthesis (voice {voice_id})")
         return response.content
+
+    def synthesize(
+        self,
+        text: str,
+        voice_id: str,
+        *,
+        output_format: str,
+        voice_settings: dict | None = None,
+    ) -> AudioSegment:
+        data = self.synthesize_bytes(
+            text, voice_id, output_format=output_format, voice_settings=voice_settings
+        )
+        return bytes_to_segment(data, output_format)

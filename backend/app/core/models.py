@@ -19,6 +19,18 @@ class Voice(BaseModel):
     category: str | None = None
 
 
+class ProviderVoices(BaseModel):
+    """The voices offered by one provider, plus an optional load error.
+
+    Grouping keeps the ``/api/voices`` response resilient: if one provider fails
+    (no API key, missing assets, library not installed) the others still return.
+    """
+
+    provider: str
+    voices: list[Voice] = Field(default_factory=list)
+    error: str | None = None
+
+
 class ScriptTurn(BaseModel):
     """A single spoken turn parsed from the script."""
 

@@ -4,15 +4,22 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
+from pydub import AudioSegment
+
 from app.core.models import Voice
 
 
 class TTSProvider(ABC):
     """Provider-agnostic text-to-speech interface.
 
-    Implementations turn a single chunk of text into encoded audio bytes and
-    expose the voices they offer. They must not know anything about scripts,
-    stitching, or HTTP — that lives in the engine and API layers.
+    Implementations turn a single chunk of text into a decoded pydub
+    ``AudioSegment`` and expose the voices they offer. Returning an
+    ``AudioSegment`` (rather than raw bytes) unifies cloud providers that emit
+    encoded audio (ElevenLabs) with local models that emit raw numpy samples
+    (Kokoro, F5) — the engine and stitcher then work in one currency.
+
+    Providers must not know anything about scripts, stitching, or HTTP — that
+    lives in the engine and API layers.
     """
 
     #: Stable, lowercase identifier used in the registry and in ``SpeakerVoice``.
@@ -20,7 +27,11 @@ class TTSProvider(ABC):
 
     @abstractmethod
     def list_voices(self) -> list[Voice]:
-        """Return the voices available from this provider."""
+        """Return the voices available from this provider.
+
+        Must be cheap and dependency-light: it is called to populate the UI and
+        should not import heavy ML libraries or load models.
+        """
 
     @abstractmethod
     def synthesize(
@@ -30,10 +41,11 @@ class TTSProvider(ABC):
         *,
         output_format: str,
         voice_settings: dict | None = None,
-    ) -> bytes:
-        """Render ``text`` with ``voice_id`` and return encoded audio bytes.
+    ) -> AudioSegment:
+        """Render ``text`` with ``voice_id`` and return a decoded AudioSegment.
 
         ``output_format`` is the provider's own format string (e.g.
-        ``"mp3_44100_128"`` or ``"wav_44100"``). The returned bytes are a
-        complete, decodable audio container in that format.
+        ``"mp3_44100_128"``); cloud providers use it to request a quality, local
+        providers ignore it (they emit a fixed sample rate). The engine
+        normalizes sample rates across providers before stitching.
         """

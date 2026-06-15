@@ -18,7 +18,7 @@ from .models import (
     SegmentInfo,
 )
 from .script_parser import distinct_speakers, parse_script
-from .stitcher import bytes_to_segment, export_master, stitch
+from .stitcher import export_master, stitch
 
 
 def generate(request: GenerateRequest, settings: Settings) -> GenerateResult:
@@ -40,10 +40,9 @@ def generate(request: GenerateRequest, settings: Settings) -> GenerateResult:
     for turn in turns:
         assignment = request.speakers[turn.speaker]
         provider = registry.get(assignment.provider)
-        audio_bytes = provider.synthesize(
+        segment = provider.synthesize(
             turn.text, assignment.voice_id, output_format=output_format
         )
-        segment = bytes_to_segment(audio_bytes, output_format)
         segments.append(segment)
         segment_infos.append(
             SegmentInfo(
@@ -55,7 +54,9 @@ def generate(request: GenerateRequest, settings: Settings) -> GenerateResult:
             )
         )
 
-    episode = stitch(segments, gap_ms)
+    episode = stitch(
+        segments, gap_ms, target_sample_rate=settings.target_sample_rate
+    )
 
     job_id = files.new_job_id()
     out_dir = files.job_dir(settings.output_dir, job_id)

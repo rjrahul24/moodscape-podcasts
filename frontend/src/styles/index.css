@@ -90,8 +90,8 @@ code {
 
 .speaker-row {
   display: grid;
-  grid-template-columns: 110px 1fr;
-  align-items: center;
+  grid-template-columns: 100px 130px 1fr;
+  align-items: start;
   gap: 0.75rem;
 }
 
@@ -99,6 +99,18 @@ code {
   color: var(--accent);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 0.9rem;
+  padding-top: 0.6rem;
+}
+
+.voice-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.voice-error {
+  color: var(--error);
+  font-size: 0.78rem;
 }
 
 select,

@@ -1,49 +1,54 @@
-"""Voices available for the per-speaker dropdown.
+"""Voices available for the per-speaker dropdowns, grouped by provider.
 
-If ``VOICE_CATALOG`` is configured, only those voice ids are offered (names
-resolved from the provider, label used as a fallback). Otherwise every voice on
-the account is returned.
+The response is resilient: each provider is listed independently, so one
+provider failing (ElevenLabs without a key, F5 with no reference assets, a local
+model whose libraries aren't installed) does not prevent the others from being
+selectable. ElevenLabs additionally honours ``VOICE_CATALOG`` filtering.
 """
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 
 from app.api.deps import SettingsDep
-from app.core.errors import ProviderError, ProviderNotFoundError
-from app.core.models import Voice
+from app.core.errors import ProviderError
+from app.core.models import ProviderVoices, Voice
 from app.providers import registry
 
 router = APIRouter()
 
 
-@router.get("/voices", response_model=list[Voice])
-def list_voices(settings: SettingsDep) -> list[Voice]:
-    try:
-        if not settings.voice_catalog:
-            return registry.get(settings.default_provider).list_voices()
+def _elevenlabs_voices(settings, provider) -> list[Voice]:
+    """List ElevenLabs voices, honouring the optional VOICE_CATALOG filter."""
+    catalog = [e for e in settings.voice_catalog if e.provider == provider.name]
+    if not catalog:
+        return provider.list_voices()
 
-        # Resolve only the catalogued voices, grouped by their provider.
-        catalog_by_provider: dict[str, dict[str, str | None]] = {}
-        for entry in settings.voice_catalog:
-            catalog_by_provider.setdefault(entry.provider, {})[entry.id] = entry.label
+    by_id = {v.id: v for v in provider.list_voices()}
+    resolved: list[Voice] = []
+    for entry in catalog:
+        found = by_id.get(entry.id)
+        resolved.append(
+            found
+            if found is not None
+            else Voice(id=entry.id, name=entry.label or entry.id, provider=provider.name)
+        )
+    return resolved
 
-        resolved: list[Voice] = []
-        for provider_name, wanted in catalog_by_provider.items():
-            by_id = {v.id: v for v in registry.get(provider_name).list_voices()}
-            for voice_id, label in wanted.items():
-                found = by_id.get(voice_id)
-                resolved.append(
-                    found
-                    if found is not None
-                    else Voice(
-                        id=voice_id,
-                        name=label or voice_id,
-                        provider=provider_name,
-                    )
-                )
-        return resolved
-    except ProviderNotFoundError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except ProviderError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+@router.get("/voices", response_model=list[ProviderVoices])
+def list_voices(settings: SettingsDep) -> list[ProviderVoices]:
+    groups: list[ProviderVoices] = []
+    for name in registry.available():
+        provider = registry.get(name)
+        try:
+            if name == "elevenlabs":
+                voices = _elevenlabs_voices(settings, provider)
+            else:
+                voices = provider.list_voices()
+            groups.append(ProviderVoices(provider=name, voices=voices))
+        except ProviderError as exc:
+            groups.append(ProviderVoices(provider=name, voices=[], error=str(exc)))
+        except Exception as exc:  # noqa: BLE001 - never let one provider break the list
+            groups.append(ProviderVoices(provider=name, voices=[], error=str(exc)))
+    return groups

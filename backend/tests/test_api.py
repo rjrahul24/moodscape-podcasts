@@ -32,12 +32,19 @@ def test_health_ok(client):
     assert "fake" in body["providers"]
 
 
-def test_voices_lists_fake_provider_voice(client):
-    # default_provider is "elevenlabs"; point voices at the fake provider instead
-    # by registering it as the default for this account-less test.
-    voices = client.get("/api/voices")
-    # elevenlabs has no key configured -> 503; that is the expected default path.
-    assert voices.status_code in (200, 503)
+def test_voices_grouped_and_resilient(client):
+    response = client.get("/api/voices")
+    assert response.status_code == 200
+    groups = {g["provider"]: g for g in response.json()}
+
+    # The fake provider's voice is present.
+    assert any(v["id"] == "fake-v1" for v in groups["fake"]["voices"])
+    # Kokoro lists its static voices without any model load.
+    assert groups["kokoro"]["voices"], "expected static Kokoro voices"
+    # ElevenLabs has no key in tests -> it reports an error but does NOT break
+    # the rest of the response.
+    assert groups["elevenlabs"]["error"] is not None
+    assert groups["elevenlabs"]["voices"] == []
 
 
 def test_generate_then_download_roundtrip(client):

@@ -1,4 +1,4 @@
-import type { GenerateRequest, GenerateResult, Voice } from "../types";
+import type { GenerateRequest, GenerateResult, ProviderVoices } from "../types";
 
 async function parseError(response: Response): Promise<string> {
   try {
@@ -10,7 +10,7 @@ async function parseError(response: Response): Promise<string> {
   }
 }
 
-export async function fetchVoices(): Promise<Voice[]> {
+export async function fetchVoices(): Promise<ProviderVoices[]> {
   const response = await fetch("/api/voices");
   if (!response.ok) throw new Error(await parseError(response));
   return response.json();

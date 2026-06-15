@@ -8,9 +8,13 @@ environment directly.
 from __future__ import annotations
 
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Repo-root "assets/" directory: app/config.py -> app -> backend -> repo root.
+_DEFAULT_ASSETS_DIR = Path(__file__).resolve().parents[2] / "assets"
 
 
 class VoiceCatalogEntry(BaseModel):
@@ -46,6 +50,21 @@ class Settings(BaseSettings):
     also_export_mp3: bool = True
     inter_turn_gap_ms: int = 400
     output_dir: str = "output"
+    # All segments are normalized to this rate before stitching, so providers
+    # with different native rates (ElevenLabs 44.1kHz, local models 24kHz) mix.
+    target_sample_rate: int = 44100
+
+    # Local models — reference voice assets (F5)
+    assets_dir: Path = _DEFAULT_ASSETS_DIR
+
+    # Kokoro
+    kokoro_speed: float = 1.0
+
+    # F5
+    f5_speed: float = 1.0
+    f5_nfe_step: int = 32
+    f5_cfg_strength: float = 2.0
+    f5_sway_coef: float = -1.0
 
     # Voice catalog (empty -> offer all account voices)
     voice_catalog: list[VoiceCatalogEntry] = Field(default_factory=list)

@@ -1,7 +1,9 @@
-"""Decode provider audio bytes, concatenate turns, and export the episode.
+"""Decode provider audio, concatenate turns, and export the episode.
 
-Uses pydub (backed by ffmpeg). Provider output formats are container formats
-(mp3 / wav / opus) so they decode directly without needing raw-PCM parameters.
+Uses pydub (backed by ffmpeg). Cloud providers hand us encoded bytes (mp3/wav);
+local models hand us raw numpy samples. Both are converted to an
+``AudioSegment`` and normalized to a common sample rate before stitching, so a
+single episode can freely mix providers with different native rates.
 """
 
 from __future__ import annotations
@@ -9,6 +11,7 @@ from __future__ import annotations
 from io import BytesIO
 from pathlib import Path
 
+import numpy as np
 from pydub import AudioSegment
 
 
@@ -35,14 +38,49 @@ def bytes_to_segment(data: bytes, output_format: str) -> AudioSegment:
     return AudioSegment.from_file(BytesIO(data), format=audio_container(output_format))
 
 
-def stitch(segments: list[AudioSegment], gap_ms: int) -> AudioSegment:
-    """Concatenate ``segments`` in order with ``gap_ms`` of silence between them."""
-    if not segments:
-        return AudioSegment.silent(duration=0)
+def numpy_to_segment(samples: np.ndarray, sample_rate: int) -> AudioSegment:
+    """Convert float32 mono samples in [-1, 1] to a 16-bit PCM AudioSegment.
 
-    gap = AudioSegment.silent(duration=max(gap_ms, 0))
-    episode = segments[0]
-    for segment in segments[1:]:
+    Local models (Kokoro, F5) return numpy waveforms; this is how they enter the
+    pydub world.
+    """
+    arr = np.asarray(samples, dtype=np.float32).squeeze()
+    if arr.ndim > 1:
+        arr = arr.mean(axis=1)  # mix down to mono
+    arr = np.clip(arr, -1.0, 1.0)
+    pcm16 = (arr * 32767.0).astype("<i2")
+    return AudioSegment(
+        data=pcm16.tobytes(),
+        sample_width=2,
+        frame_rate=int(sample_rate),
+        channels=1,
+    )
+
+
+def normalize_segment(segment: AudioSegment, sample_rate: int) -> AudioSegment:
+    """Force a segment to mono at ``sample_rate`` so segments can concatenate."""
+    return segment.set_frame_rate(int(sample_rate)).set_channels(1)
+
+
+def stitch(
+    segments: list[AudioSegment],
+    gap_ms: int,
+    *,
+    target_sample_rate: int = 44100,
+) -> AudioSegment:
+    """Concatenate ``segments`` in order with ``gap_ms`` of silence between them.
+
+    Every segment (and the gap) is normalized to ``target_sample_rate`` mono
+    first, so providers with different native rates mix cleanly.
+    """
+    if not segments:
+        return AudioSegment.silent(duration=0, frame_rate=target_sample_rate)
+
+    normalized = [normalize_segment(s, target_sample_rate) for s in segments]
+    gap = AudioSegment.silent(duration=max(gap_ms, 0), frame_rate=target_sample_rate)
+
+    episode = normalized[0]
+    for segment in normalized[1:]:
         episode += gap + segment
     return episode
 

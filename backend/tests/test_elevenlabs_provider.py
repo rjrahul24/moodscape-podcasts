@@ -1,11 +1,22 @@
+from io import BytesIO
+
 import httpx
 import pytest
 import respx
+from pydub import AudioSegment
 
 from app.core.errors import ProviderError
 from app.providers.elevenlabs_provider import ElevenLabsProvider
 
 BASE = "https://api.elevenlabs.io"
+
+
+def _silent_wav_bytes(duration_ms: int = 200) -> bytes:
+    buffer = BytesIO()
+    AudioSegment.silent(duration=duration_ms, frame_rate=44100).export(
+        buffer, format="wav"
+    )
+    return buffer.getvalue()
 
 
 @respx.mock
@@ -32,18 +43,31 @@ def test_list_voices_maps_payload():
 
 
 @respx.mock
-def test_synthesize_returns_audio_bytes_and_sends_format():
+def test_synthesize_bytes_sends_format_and_key():
     route = respx.post(f"{BASE}/v1/text-to-speech/v1").mock(
         return_value=httpx.Response(200, content=b"FAKEAUDIO")
     )
     provider = ElevenLabsProvider("test-key", base_url=BASE)
 
-    audio = provider.synthesize("hello", "v1", output_format="wav_44100")
+    audio = provider.synthesize_bytes("hello", "v1", output_format="wav_44100")
 
     assert audio == b"FAKEAUDIO"
     request = route.calls.last.request
     assert request.url.params["output_format"] == "wav_44100"
     assert request.headers["xi-api-key"] == "test-key"
+
+
+@respx.mock
+def test_synthesize_returns_decoded_segment():
+    respx.post(f"{BASE}/v1/text-to-speech/v1").mock(
+        return_value=httpx.Response(200, content=_silent_wav_bytes(200))
+    )
+    provider = ElevenLabsProvider("test-key", base_url=BASE)
+
+    segment = provider.synthesize("hello", "v1", output_format="wav_44100")
+
+    assert isinstance(segment, AudioSegment)
+    assert abs(len(segment) - 200) < 50
 
 
 @respx.mock

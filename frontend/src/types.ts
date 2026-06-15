@@ -7,6 +7,12 @@ export interface Voice {
   category?: string | null;
 }
 
+export interface ProviderVoices {
+  provider: string;
+  voices: Voice[];
+  error?: string | null;
+}
+
 export interface SpeakerVoice {
   provider: string;
   voice_id: string;

@@ -3,10 +3,10 @@ import { fetchVoices, generatePodcast } from "./api/client";
 import { ResultPlayer } from "./components/ResultPlayer";
 import { ScriptInput } from "./components/ScriptInput";
 import { SpeakerConfig, speakerLabel } from "./components/SpeakerConfig";
-import type { GenerateResult, SpeakerVoice, Voice } from "./types";
+import type { GenerateResult, ProviderVoices, SpeakerVoice } from "./types";
 
 export default function App() {
-  const [voices, setVoices] = useState<Voice[]>([]);
+  const [providerVoices, setProviderVoices] = useState<ProviderVoices[]>([]);
   const [voicesError, setVoicesError] = useState<string | null>(null);
 
   const [numSpeakers, setNumSpeakers] = useState(2);
@@ -19,15 +19,27 @@ export default function App() {
 
   useEffect(() => {
     fetchVoices()
-      .then(setVoices)
+      .then(setProviderVoices)
       .catch((err: Error) => setVoicesError(err.message));
   }, []);
 
-  function handleVoiceChange(speaker: string, voiceId: string) {
-    const voice = voices.find((v) => v.id === voiceId);
+  const defaultProvider = providerVoices[0]?.provider ?? "elevenlabs";
+
+  function handleProviderChange(speaker: string, provider: string) {
     setSpeakerVoices((prev) => ({
       ...prev,
-      [speaker]: { provider: voice?.provider ?? "elevenlabs", voice_id: voiceId },
+      // Switching the model clears the voice — voices are provider-specific.
+      [speaker]: { provider, voice_id: "" },
+    }));
+  }
+
+  function handleVoiceChange(speaker: string, voiceId: string) {
+    setSpeakerVoices((prev) => ({
+      ...prev,
+      [speaker]: {
+        provider: prev[speaker]?.provider ?? defaultProvider,
+        voice_id: voiceId,
+      },
     }));
   }
 
@@ -47,7 +59,6 @@ export default function App() {
     setError(null);
     setResult(null);
     try {
-      // Only send voice assignments for the active speakers.
       const speakers: Record<string, SpeakerVoice> = {};
       for (const s of activeSpeakers) speakers[s] = speakerVoices[s];
 
@@ -67,23 +78,22 @@ export default function App() {
     <div className="app">
       <header className="app-head">
         <h1>🎙️ Moodscape Podcasts</h1>
-        <p>Paste a multi-speaker script, assign a voice to each speaker, generate the episode.</p>
+        <p>Paste a multi-speaker script, assign a model + voice to each speaker, generate the episode.</p>
       </header>
 
       {voicesError && (
         <div className="banner error">
           Couldn’t load voices: {voicesError}
-          <span className="banner-hint">
-            Check <code>ELEVENLABS_API_KEY</code> in <code>backend/.env</code>.
-          </span>
+          <span className="banner-hint">Is the backend running?</span>
         </div>
       )}
 
       <SpeakerConfig
         numSpeakers={numSpeakers}
         onNumSpeakersChange={setNumSpeakers}
-        voices={voices}
+        providerVoices={providerVoices}
         speakerVoices={speakerVoices}
+        onProviderChange={handleProviderChange}
         onVoiceChange={handleVoiceChange}
       />
 
@@ -94,7 +104,7 @@ export default function App() {
           {loading ? "Generating…" : "Generate podcast"}
         </button>
         {!allVoicesAssigned && (
-          <span className="hint">Assign a voice to every speaker first.</span>
+          <span className="hint">Assign a model + voice to every speaker first.</span>
         )}
       </div>
 

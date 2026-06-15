@@ -1,11 +1,12 @@
-import type { SpeakerVoice, Voice } from "../types";
+import type { ProviderVoices, SpeakerVoice } from "../types";
 import { VoiceSelect } from "./VoiceSelect";
 
 interface Props {
   numSpeakers: number;
   onNumSpeakersChange: (n: number) => void;
-  voices: Voice[];
+  providerVoices: ProviderVoices[];
   speakerVoices: Record<string, SpeakerVoice>;
+  onProviderChange: (speaker: string, provider: string) => void;
   onVoiceChange: (speaker: string, voiceId: string) => void;
   maxSpeakers?: number;
 }
@@ -14,11 +15,22 @@ export function speakerLabel(i: number): string {
   return `Speaker ${i + 1}`;
 }
 
+const PROVIDER_LABELS: Record<string, string> = {
+  elevenlabs: "ElevenLabs",
+  kokoro: "Kokoro",
+  f5: "F5",
+};
+
+function providerLabel(name: string): string {
+  return PROVIDER_LABELS[name] ?? name;
+}
+
 export function SpeakerConfig({
   numSpeakers,
   onNumSpeakersChange,
-  voices,
+  providerVoices,
   speakerVoices,
+  onProviderChange,
   onVoiceChange,
   maxSpeakers = 6,
 }: Props) {
@@ -44,16 +56,41 @@ export function SpeakerConfig({
       </div>
 
       <div className="speaker-rows">
-        {speakers.map((speaker) => (
-          <div key={speaker} className="speaker-row">
-            <span className="speaker-tag">[{speaker}]</span>
-            <VoiceSelect
-              voices={voices}
-              value={speakerVoices[speaker]?.voice_id ?? ""}
-              onChange={(voiceId) => onVoiceChange(speaker, voiceId)}
-            />
-          </div>
-        ))}
+        {speakers.map((speaker) => {
+          const selectedProvider = speakerVoices[speaker]?.provider ?? "";
+          const group = providerVoices.find((p) => p.provider === selectedProvider);
+          return (
+            <div key={speaker} className="speaker-row">
+              <span className="speaker-tag">[{speaker}]</span>
+
+              <select
+                className="provider-select"
+                value={selectedProvider}
+                onChange={(e) => onProviderChange(speaker, e.target.value)}
+              >
+                <option value="" disabled>
+                  Model…
+                </option>
+                {providerVoices.map((p) => (
+                  <option key={p.provider} value={p.provider}>
+                    {providerLabel(p.provider)}
+                  </option>
+                ))}
+              </select>
+
+              <div className="voice-cell">
+                <VoiceSelect
+                  voices={group?.voices ?? []}
+                  value={speakerVoices[speaker]?.voice_id ?? ""}
+                  onChange={(voiceId) => onVoiceChange(speaker, voiceId)}
+                />
+                {group?.error && (
+                  <span className="voice-error">{group.error}</span>
+                )}
+              </div>
+            </div>
+          );
+        })}
       </div>
     </section>
   );

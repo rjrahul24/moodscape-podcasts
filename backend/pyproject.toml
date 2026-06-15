@@ -2,7 +2,9 @@
 name = "moodscape-podcasts-backend"
 version = "0.1.0"
 description = "Moodscape Podcasts backend — multi-speaker script to podcast audio via pluggable TTS providers."
-requires-python = ">=3.11"
+# Upper bound is for the local TTS stack: Kokoro/F5 pull in spacy, which has no
+# cp314 wheels yet. 3.13 has wheels for torch + spacy + the whole stack.
+requires-python = ">=3.11,<3.14"
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
@@ -11,9 +13,17 @@ dependencies = [
     "httpx>=0.27",
     "pydub>=0.25.1",
     "python-multipart>=0.0.9",
+    "numpy>=1.26",
+    "soundfile>=0.12",
     # pydub relies on the stdlib `audioop` module, which was removed in Python 3.13.
     # audioop-lts backports it for 3.13+ (this machine runs 3.14).
     "audioop-lts; python_version >= '3.13'",
+    # ── Local TTS models (Kokoro, F5). Heavy; imported lazily at synthesis. ──
+    "torch>=2.10",
+    "torchaudio>=2.10",
+    "transformers>=4.55,<4.58",
+    "kokoro>=0.9.4",
+    "f5-tts>=1.0.0",
 ]
 
 [project.optional-dependencies]
