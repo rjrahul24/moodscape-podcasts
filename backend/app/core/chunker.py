@@ -26,7 +26,7 @@ from .models import ScriptTurn
 # from Settings; these are the safe fallbacks.
 DEFAULT_BUDGETS: dict[str, int] = {
     "kokoro": 400,  # well under Kokoro's 510 phoneme-token cap, no "rushed" artifacts
-    "f5": 350,  # ~25s of narration; F5 garbles past ~30s per pass
+    "f5": 250,  # ~18s of narration; stay well under F5's ~30s garble edge
     "elevenlabs": 2400,  # cloud handles long text; chunk mainly for progress granularity
 }
 

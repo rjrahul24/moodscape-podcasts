@@ -1,4 +1,5 @@
 import type { GenerateResult } from "../types";
+import { Icon } from "./Icon";
 
 interface Props {
   result: GenerateResult;
@@ -23,7 +24,9 @@ export function ResultPlayer({ result }: Props) {
   return (
     <section className="panel result">
       <div className="panel-head">
-        <h2>Episode</h2>
+        <h2>
+          <Icon name="disc" /> Episode
+        </h2>
         <span className="hint">{formatDuration(result.duration_ms)} · {result.segments.length} turns</span>
       </div>
 
@@ -35,7 +38,8 @@ export function ResultPlayer({ result }: Props) {
         {result.files.map((file) => (
           <li key={file.filename}>
             <a href={file.download_url} download={file.filename}>
-              ⬇ {file.filename}
+              <Icon name="download" size={16} />
+              {file.filename}
             </a>
             <span className="meta">
               {file.format.toUpperCase()} · {formatBytes(file.size_bytes)}

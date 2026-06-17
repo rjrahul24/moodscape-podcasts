@@ -1,4 +1,5 @@
-import type { ProviderVoices, SpeakerVoice } from "../types";
+import { ELEVENLABS_MODELS, type ProviderVoices, type SpeakerVoice } from "../types";
+import { Icon } from "./Icon";
 import { VoiceSelect } from "./VoiceSelect";
 
 interface Props {
@@ -8,6 +9,7 @@ interface Props {
   speakerVoices: Record<string, SpeakerVoice>;
   onProviderChange: (speaker: string, provider: string) => void;
   onVoiceChange: (speaker: string, voiceId: string) => void;
+  onModelChange: (speaker: string, modelId: string) => void;
   maxSpeakers?: number;
 }
 
@@ -32,6 +34,7 @@ export function SpeakerConfig({
   speakerVoices,
   onProviderChange,
   onVoiceChange,
+  onModelChange,
   maxSpeakers = 6,
 }: Props) {
   const speakers = Array.from({ length: numSpeakers }, (_, i) => speakerLabel(i));
@@ -39,7 +42,9 @@ export function SpeakerConfig({
   return (
     <section className="panel">
       <div className="panel-head">
-        <h2>Speakers</h2>
+        <h2>
+          <Icon name="users" /> Speakers
+        </h2>
         <label className="num-speakers">
           How many?
           <select
@@ -59,6 +64,9 @@ export function SpeakerConfig({
         {speakers.map((speaker) => {
           const selectedProvider = speakerVoices[speaker]?.provider ?? "";
           const group = providerVoices.find((p) => p.provider === selectedProvider);
+          const isElevenLabs = selectedProvider === "elevenlabs";
+          const selectedModel =
+            speakerVoices[speaker]?.model_id ?? ELEVENLABS_MODELS[0].id;
           return (
             <div key={speaker} className="speaker-row">
               <span className="speaker-tag">[{speaker}]</span>
@@ -77,6 +85,21 @@ export function SpeakerConfig({
                   </option>
                 ))}
               </select>
+
+              {isElevenLabs && (
+                <select
+                  className="provider-select"
+                  value={selectedModel}
+                  onChange={(e) => onModelChange(speaker, e.target.value)}
+                  title="ElevenLabs model"
+                >
+                  {ELEVENLABS_MODELS.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.label}
+                    </option>
+                  ))}
+                </select>
+              )}
 
               <div className="voice-cell">
                 <VoiceSelect

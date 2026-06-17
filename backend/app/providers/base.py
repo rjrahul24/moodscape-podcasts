@@ -25,6 +25,19 @@ class TTSProvider(ABC):
     #: Stable, lowercase identifier used in the registry and in ``SpeakerVoice``.
     name: str
 
+    # ── capability flags ──────────────────────────────────────────────────────
+    # The orchestrator branches on these instead of hardcoding provider names, so
+    # behaviour stays "split per model" without name checks leaking up the stack.
+
+    #: Provider applies a numeric ``speed`` from voice_settings as an internal
+    #: speaking-rate multiplier (local models: Kokoro, F5).
+    consumes_local_speed: bool = False
+
+    #: Provider accepts a native ``speed`` setting in its own API range
+    #: (ElevenLabs, 0.7–1.2). Distinct from ``consumes_local_speed``: this is a
+    #: model-native control, not a resampling/rate multiplier we apply ourselves.
+    has_native_speed: bool = False
+
     @abstractmethod
     def list_voices(self) -> list[Voice]:
         """Return the voices available from this provider.

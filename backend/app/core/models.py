@@ -42,10 +42,17 @@ class ScriptTurn(BaseModel):
 
 
 class SpeakerVoice(BaseModel):
-    """The provider + voice assigned to one speaker label."""
+    """The provider + voice assigned to one speaker label.
+
+    ``model_id`` is an optional, provider-specific model override (used by
+    ElevenLabs to pick ``eleven_multilingual_v2`` vs ``eleven_v3``). Other
+    providers ignore it; when unset the provider falls back to its configured
+    per-content-type default.
+    """
 
     provider: str = "elevenlabs"
     voice_id: str
+    model_id: str | None = None
 
 
 class GenerateRequest(BaseModel):
@@ -72,6 +79,10 @@ class PodcastRequest(BaseModel):
     speakers: dict[str, SpeakerVoice]
     output_format: str | None = None  # overrides Settings.segment_output_format
     gap_ms: int | None = None  # overrides Settings.inter_turn_gap_ms
+    # Conversational pacing: sentence micro-pauses, variable turn gaps, per-chunk
+    # speed jitter, and inline tone/pause tags. On by default; set False for the
+    # legacy flat render (one block per turn, fixed gaps, no emotion).
+    pacing: bool = True
 
 
 class SleepStoryRequest(BaseModel):
@@ -87,6 +98,7 @@ class SleepStoryRequest(BaseModel):
     prose_text: str
     provider: str = "kokoro"
     voice_id: str
+    model_id: str | None = None  # ElevenLabs model override (v2/v3); else ignored
     speed: float | None = None  # overrides Settings.sleep_default_speed
     pause_ms: int | None = None  # inter-sentence silence; overrides default
     ambient_bed: str | None = None  # slug from /api/ambient (optional)

@@ -89,11 +89,21 @@ npm run dev                              # http://localhost:5173 (proxies /api �
   parser, orchestrator, stitcher, API, and frontend should not need changes.
 - **Per-job tuning rides `voice_settings`.** Don't change the `synthesize`
   signature for per-job params — pass them in the `voice_settings` dict (today:
-  `speed`, read by Kokoro/F5). The orchestrator injects `speed` only for local
-  providers; chunking and pauses stay in the orchestrator, never in providers.
-- **No meditation processing on podcasts.** Copy only the core text→audio path
-  from any reference implementation. The calming treatment is allowed **only**
-  for the Sleep Stories content type (`core/sleep_post.py`, `core/ambient.py`).
+  `speed` and `emotion`, read by Kokoro/F5; `emotion` also mapped to a native
+  profile by ElevenLabs). The orchestrator injects `speed` only for local
+  providers; chunking, pauses, and pacing stay in the orchestrator
+  (`core/text_processor.py`), never in providers.
+- **No meditation processing on podcasts — with one sanctioned exception.** Copy
+  only the core text→audio path from any reference implementation. The full
+  calming *mastering* treatment (loudness normalization, EQ, compression, fades,
+  ambient beds) is allowed **only** for Sleep Stories (`core/sleep_post.py`,
+  `core/ambient.py`) — never on podcasts. **Conversational pacing + voice
+  emotion** *is* allowed on podcasts: sentence micro-pauses, variable inter-turn
+  gaps, per-chunk speed jitter, and tone tags via `voice_settings`
+  (`core/text_processor.py`, `core/emotion.py`). These shape *timing and how
+  words are spoken* at conversational scale (tens–low-hundreds of ms), not the
+  meditative silence-padding/mastering reserved for sleep. Gated by
+  `PodcastRequest.pacing` (default on); `pacing=False` is the legacy flat render.
 
 See `docs/ARCHITECTURE.md` for the full picture and runbooks ("add a provider",
 "add an F5 voice", "add an ambient bed").

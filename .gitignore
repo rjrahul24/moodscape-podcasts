@@ -26,3 +26,6 @@ backend/output/
 .idea/
 .vscode/
 *.log
+
+# Claude Code local config and skills
+.claude/

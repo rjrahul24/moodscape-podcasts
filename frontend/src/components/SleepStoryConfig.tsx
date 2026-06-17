@@ -1,4 +1,9 @@
-import type { AmbientBed, ProviderVoices } from "../types";
+import {
+  ELEVENLABS_MODELS,
+  type AmbientBed,
+  type ProviderVoices,
+} from "../types";
+import { Icon } from "./Icon";
 import { VoiceSelect } from "./VoiceSelect";
 
 interface Props {
@@ -6,12 +11,14 @@ interface Props {
   ambientBeds: AmbientBed[];
   provider: string;
   voiceId: string;
+  modelId: string;
   speed: number;
   pauseMs: number;
   ambientBed: string;
   proseText: string;
   onProviderChange: (provider: string) => void;
   onVoiceChange: (voiceId: string) => void;
+  onModelChange: (modelId: string) => void;
   onSpeedChange: (speed: number) => void;
   onPauseChange: (pauseMs: number) => void;
   onAmbientChange: (slug: string) => void;
@@ -43,25 +50,30 @@ export function SleepStoryConfig({
   ambientBeds,
   provider,
   voiceId,
+  modelId,
   speed,
   pauseMs,
   ambientBed,
   proseText,
   onProviderChange,
   onVoiceChange,
+  onModelChange,
   onSpeedChange,
   onPauseChange,
   onAmbientChange,
   onProseChange,
 }: Props) {
   const group = providerVoices.find((p) => p.provider === provider);
+  const isElevenLabs = provider === "elevenlabs";
   const wordCount = proseText.trim() ? proseText.trim().split(/\s+/).length : 0;
 
   return (
     <>
       <section className="panel">
         <div className="panel-head">
-          <h2>Narration</h2>
+          <h2>
+            <Icon name="sliders" /> Narration
+          </h2>
           <span className="hint">One voice, calming pace</span>
         </div>
 
@@ -82,6 +94,22 @@ export function SleepStoryConfig({
               ))}
             </select>
           </label>
+
+          {isElevenLabs && (
+            <label className="field">
+              <span className="field-label">Engine</span>
+              <select
+                value={modelId}
+                onChange={(e) => onModelChange(e.target.value)}
+              >
+                {ELEVENLABS_MODELS.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
 
           <label className="field">
             <span className="field-label">Voice</span>
@@ -146,7 +174,9 @@ export function SleepStoryConfig({
 
       <section className="panel">
         <div className="panel-head">
-          <h2>Story</h2>
+          <h2>
+            <Icon name="book" /> Story
+          </h2>
           <span className="hint">
             {wordCount} words · {durationGuidance(wordCount)}
           </span>

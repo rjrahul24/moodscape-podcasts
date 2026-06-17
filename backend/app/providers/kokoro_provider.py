@@ -14,6 +14,7 @@ import logging
 import numpy as np
 from pydub import AudioSegment
 
+from app.core import emotion as emotion_map
 from app.core.errors import ProviderError
 from app.core.models import Voice
 from app.core.stitcher import numpy_to_segment
@@ -43,6 +44,7 @@ VOICES: dict[str, str] = {
 
 class KokoroProvider(TTSProvider):
     name = "kokoro"
+    consumes_local_speed = True
 
     def __init__(self, *, speed: float = 1.0):
         self._speed = speed
@@ -67,7 +69,10 @@ class KokoroProvider(TTSProvider):
         pipe = self._get_pipeline(voice_id)
         # Per-job speed (e.g. sleep stories at ~0.85) rides voice_settings so the
         # provider contract is unchanged; falls back to the configured default.
-        speed = (voice_settings or {}).get("speed", self._speed)
+        # A podcast tone tag (``emotion``) nudges the rate on top of that.
+        settings = voice_settings or {}
+        speed = settings.get("speed", self._speed)
+        speed *= emotion_map.speed_multiplier(settings.get("emotion"))
         try:
             chunks: list[np.ndarray] = []
             for _graphemes, _phonemes, audio in pipe(

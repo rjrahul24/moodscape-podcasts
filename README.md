@@ -88,14 +88,18 @@ uv run uvicorn app.main:app --reload   # serves on http://localhost:8000
 ```
 
 > **First local generation is slow.** The first time you use Kokoro or F5 the
-> model weights download and load (hundreds of MB each). Kokoro runs on CPU
-> (fast enough), F5 on Apple Silicon's MPS.
+> model weights download and load (hundreds of MB each). On Apple Silicon both
+> default to **CPU + float32** (reliable; `float16`-on-MPS garbles F5 output). To
+> try Metal, set `F5_DEVICE=mps` after checking `backend/scripts/bench_f5.py`
+> (`uv run python scripts/bench_f5.py`) to see whether MPS actually wins.
 
 Key `.env` settings:
 
 | Variable | What it does |
 | --- | --- |
 | `ELEVENLABS_API_KEY` | Your ElevenLabs key (required to fetch voices / generate). |
+| `ELEVENLABS_PODCAST_MODEL` / `ELEVENLABS_SLEEP_MODEL` | Default ElevenLabs model per content type (`eleven_multilingual_v2` or `eleven_v3`). The UI overrides this per speaker / per sleep story. v3 needs account access. |
+| `F5_DEVICE` / `F5_DTYPE` | F5 runtime: `auto`/`cpu`/`mps`/`cuda` and `float32`/`float16`. Default `auto`+`float32` → CPU on Apple Silicon. |
 | `VOICE_CATALOG` | JSON list of voices for the dropdown, e.g. `[{"id":"...","label":"Rachel"}]`. Empty `[]` offers every voice on the account. |
 | `SEGMENT_OUTPUT_FORMAT` | Per-segment format requested from the provider. Best quality (Pro tier): `wav_44100`. Any tier: `mp3_44100_128`. |
 | `FINAL_FORMAT` | Master export format: `wav` (lossless) or `mp3`. |
@@ -115,10 +119,15 @@ npm run dev                   # serves on http://localhost:5173 (proxies /api �
 Open http://localhost:5173 and choose a content type at the top:
 
 - **Podcast** — pick the number of speakers, choose a **model and voice** for
-  each, paste your `[Speaker N]:` script, and click **Generate podcast**.
-- **Sleep Story** — pick one **model and voice**, set the **speed** and
-  **inter-sentence pause**, optionally choose an **ambient bed**, paste your
-  story as plain prose, and click **Generate sleep story**.
+  each (ElevenLabs speakers also get a **v2 / v3** engine picker), paste your
+  `[Speaker N]:` script, and click **Generate podcast**. Leave **Natural pacing**
+  on (default) for sentence pauses, varied timing, and inline tone/pause tags;
+  turn it off for a flat, evenly-spaced render.
+- **Sleep Story** — pick one **model and voice** (ElevenLabs adds the **v2 / v3**
+  engine picker), set the **speed** and **inter-sentence pause**, optionally
+  choose an **ambient bed**, paste your story as plain prose, and click
+  **Generate sleep story**. The chosen voice now narrates calmly at the model
+  level, then the sleep mastering chain runs on top.
 
 Either way a progress bar tracks the job live until the player + download links
 appear.
@@ -170,7 +179,39 @@ Each turn starts with a `[Speaker N]:` marker and may span multiple lines:
 ```
 
 The speaker labels (`Speaker 1`, `Speaker 2`, …) map to the voices you assign in
-the UI. Inline provider tags like `[excited]` are passed through to the provider.
+the UI.
+
+### Conversational pacing & tone tags (podcasts)
+
+With **Natural pacing** on, podcasts get sentence micro-pauses, slightly varied
+speaking speed, and variable gaps between turns — so they sound like a real
+conversation rather than one flat read. You can also author timing and tone
+inline:
+
+| Tag | Effect |
+| --- | --- |
+| `[pause:600]` or `[pause:600ms]` | Insert silence (here, 600 ms) at that point in the turn. |
+| `[excited]` `[calm]` `[sad]` `[whispering]` `[neutral]` | Set the tone for the rest of that line. Local voices (Kokoro/F5) adjust speaking rate; ElevenLabs **v2** maps it to native voice settings, **v3** performs it as an inline audio tag. |
+
+```
+[Speaker 1]: That's a great point. [pause:500] I hadn't thought of it that way.
+[Speaker 2]: [excited] Right?! The data totally surprised me too.
+```
+
+Recognized tags are removed before synthesis (never spoken). Any other bracketed
+text is passed through to the provider unchanged. Tone tags are *not* needed —
+pacing alone already makes a big difference. Turning Natural pacing off ignores
+these tags and renders flat.
+
+**Want an LLM to write the whole script?** `docs/prompting_guides/` has
+ready-to-use, model-specific prompts ([ElevenLabs](docs/prompting_guides/elevenlabs.md),
+[Kokoro](docs/prompting_guides/kokoro.md), [F5](docs/prompting_guides/f5.md)) —
+paste one into ChatGPT/Claude, fill in your topic and speakers, and it returns a
+paste-ready script. See [the index](docs/prompting_guides/README.md).
+
+> **Mindfulness podcasts, not meditations.** Pacing + tone only ever change
+> *timing and delivery* at conversational scale. The heavier calming treatment
+> (loudness mastering, EQ, fades, ambient beds) stays exclusive to Sleep Stories.
 
 ## Output quality
 

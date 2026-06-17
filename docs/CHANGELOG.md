@@ -3,6 +3,123 @@
 Append-only log of notable changes and the decisions behind them. Newest first.
 Every change should add an entry (see `CLAUDE.md` → Documentation discipline).
 
+## 2026-06-17 — Model-specific TTS: ElevenLabs v2/v3 + content tailoring, F5 runtime fix
+
+The pipeline was provider-agnostic to a fault: one uniform `voice_settings` dict
+for every model, no tailoring by content type, ElevenLabs locked to v2 with sleep
+stories getting `voice_settings=None`, and F5 running MPS + float16 (18–20 min for
+3 min of audio, with slurred/garbled words on this M1 Max). Split each model's
+implementation so the backend applies that model's best practices, parameterized
+by content type.
+
+- **Provider capability flags (cross-cutting).** `TTSProvider` now declares
+  `consumes_local_speed` (Kokoro/F5) and `has_native_speed` (ElevenLabs). The
+  orchestrator branches on these instead of the old `_SPEED_AWARE = {"kokoro",
+  "f5"}` name set — the structural "split per model" without name checks.
+- **ElevenLabs tailored by model AND content type** (`elevenlabs_provider._prepare`).
+  **v2:** numeric `stability/similarity_boost/style` — `EMOTION_PROFILES` for a
+  tone tag, else a per-content base (`V2_CONTENT_BASE`: expressive podcast vs
+  calm/high-stability sleep) — plus native `speed` (clamped 0.7–1.2). **v3:**
+  discrete stability (Creative/Natural/Robust) + tone performed *inline*
+  (`V3_AUDIO_TAGS`). Model is user-selectable per speaker / per sleep story
+  (`SpeakerVoice.model_id`, `SleepStoryRequest.model_id`), defaulting to
+  `ELEVENLABS_PODCAST_MODEL`/`ELEVENLABS_SLEEP_MODEL`.
+- **Sleep stories on ElevenLabs now sound calm at the model level.** `_run_sleep`
+  builds a calm `content_type="sleep"` profile + native slow speed (was `None`),
+  so the voice narrates gently *before* the sleep mastering chain runs.
+- **F5 runtime fix.** Replaced the hardcoded `device="mps"` + unconditional
+  `float16` cast with config-driven `F5_DEVICE`/`F5_DTYPE`, defaulting to **CPU +
+  float32** (float16-on-MPS was the documented cause of the garbling; MPS is now
+  opt-in and sets `PYTORCH_ENABLE_MPS_FALLBACK=1`). Inference runs under
+  `torch.inference_mode()`; CPU path sets thread count. `nfe_step` 32→16 (~halves
+  latency), `F5_CHUNK_CHARS` 350→250 (further from the ~30s garble edge).
+  `sway_coef=-1.0`/`cfg=2.0` kept (correct F5 defaults). Added `scripts/bench_f5.py`
+  to time CPU-fp32 vs MPS-fp32 and pick the host default.
+- **Reference transcripts were not a bug.** The four shipped voices intentionally
+  read the same script, so identical `reference_text/*.txt` correctly match their
+  `.wav`s — documented the contract (identity comes from the audio).
+- **Docs/guides:** `elevenlabs.md` gained a v2-vs-v3 section + v3 inline audio-tag
+  note; `f5.md` + ARCHITECTURE document the reference contract and local runtime;
+  prompting-guides README, `.env.example`, and README updated.
+
+Trade-offs: v3 needs ElevenLabs account access and caps at 5k chars/request
+(under our chunk budget). F5 on Apple Silicon is CPU-bound by default — reliable
+and far faster than the broken MPS-fp16 path, but a real GPU/MPS win is left to
+the per-host benchmark.
+
+## 2026-06-16 — Lifelike podcasts: conversational pacing + voice emotion
+
+Podcasts sounded robotic: each turn was synthesized as one flat block, the only
+silence was a fixed 400 ms inter-turn gap, and `voice_settings` was always `None`.
+Added a provider-agnostic conversational layer so podcasts breathe and vary like
+real dialogue, plus an optional inline tag vocabulary for authored control.
+
+- **New `core/text_processor.py`** turns a parsed turn into ordered `Speech`/`Pause`
+  plan items: sentence-boundary splitting with a *randomized* intra-sentence
+  micro-pause (default 80–220 ms), explicit `[pause:600]` / `[pause:600ms]` tags,
+  and a leading tone tag (`[excited]`/`[calm]`/`[sad]`/`[whispering]`/`[neutral]`)
+  lifted off the text and attached as `emotion`. Byte-budget splitting is still
+  delegated to `chunker.chunk_text`. Recognized tags are stripped so no provider
+  ever speaks them; unknown `[...]` tags pass through unchanged as before.
+- **`orchestrator._run_podcast`** now drives planning through `text_processor`,
+  inserts variable inter-turn gaps (±`podcast_turn_gap_jitter`) and the per-chunk
+  micro-pauses, and builds `voice_settings={"emotion", "speed"}` per chunk (speed
+  jitter only for the speed-aware local providers). The RNG is seeded from
+  `job_id` so a job renders **deterministically** and tests are stable.
+- **Emotion is per-provider, signature unchanged.** New `core/emotion.py` holds
+  the shared tag vocabulary + emotion→speed multipliers (Kokoro/F5 multiply it
+  into their rate); ElevenLabs maps the same tag to a native
+  `stability/similarity_boost/style` profile (`EMOTION_PROFILES`) and drops the
+  local-only `speed`/`emotion` keys before calling the API.
+- **`PodcastRequest.pacing` (default `True`)** gates the whole thing; `pacing=False`
+  reproduces the exact legacy flat render (one block per turn, fixed gap, no
+  emotion). New `config.py` knobs: `podcast_default_speed`, `podcast_speed_jitter`,
+  `podcast_intra_sentence_gap_ms_min/max`, `podcast_turn_gap_jitter`.
+- **Frontend:** a "Natural pacing" toggle and an inline-tag legend under the
+  script box (`ScriptInput.tsx`), wired through `App.tsx`/`types.ts`.
+
+Decisions & trade-offs:
+- **Sanctioned exception to the "no podcast processing" rule, scoped narrowly:**
+  pacing + voice-emotion only. Loudness normalization, EQ, compression, fades, and
+  ambient beds stay **sleep-only** — podcasts never touch `sleep_post`/`ambient`.
+  CLAUDE.md updated to record the carve-out.
+- **Tone via `voice_settings`, not performed inline tags.** ElevenLabs only
+  *performs* `[laughs]`/`[sighs]`/`[excited]` on `eleven_v3`; the app defaults to
+  `eleven_multilingual_v2`, so tone is delivered through voice-settings profiles
+  (which work on v2) and tags are stripped from the spoken text. `eleven_v3`
+  opt-in, F5 emotional reference-clip swapping, and a laugh/sigh expression-clip
+  library are deferred (see the design spec).
+
+## 2026-06-15 — Frontend redesign: token-driven design system
+
+Rebuilt the frontend's visual layer into a modern, cohesive design system
+("Calm Studio") without touching any app logic, state, or API calls. Driven via
+the UI/UX Pro Max skill's `--design-system` recommendation (wellness palette:
+lavender + mint; Lora/Raleway pairing), adapted to the app's dark-first studio
+context.
+
+- **One source of truth for styling.** `src/styles/index.css` is now fully
+  token-driven: every color, spacing step (4/8 rhythm), radius, shadow, motion
+  curve, and font is a `:root` custom property, and components reference tokens
+  rather than raw hex. Restyling the whole app is now a token edit.
+- **Real iconography, no emoji.** Added `components/Icon.tsx` — a single
+  stroke-based SVG set (Lucide-derived, `currentColor`) — and replaced every
+  emoji (🎙️ 🌙 ⬇) used as a structural glyph in the header, content tabs, panel
+  headers, CTA, and download links. Emoji render inconsistently across platforms
+  and can't be themed; SVG fixes both.
+- **Polish + accessibility.** Visible `:focus-visible` rings on all controls,
+  custom themed `select` chevrons and range thumbs, an animated progress sheen,
+  `role="progressbar"`/`role="alert"` semantics, a responsive single-column
+  collapse under 560px, and a global `prefers-reduced-motion` override.
+- **Why dark-first, not the skill's light neumorphism.** The skill flagged
+  neumorphism's low contrast; the app is a "studio" tool, so we kept the dark
+  surface model but folded in the recommended lavender/mint ramp and serif/sans
+  pairing for a calmer, more modern feel that still clears 4.5:1 contrast.
+- **Scope:** pure presentation. No component contracts, props, or backend calls
+  changed; `tsc && vite build` passes and both content-type flows were verified
+  in a live preview. Added `.claude/launch.json` so the frontend can be previewed
+  with one command.
+
 ## 2026-06-15 — Single-command dev launcher (`dev.sh`)
 
 Added a root `dev.sh` so the app starts with one command instead of running the

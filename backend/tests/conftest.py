@@ -9,8 +9,18 @@ from app.providers.base import TTSProvider
 class FakeProvider(TTSProvider):
     """A network-free provider that returns fixed-length silent audio."""
 
-    def __init__(self, name: str = "fake", duration_ms: int = 300, sample_rate: int = 24000):
+    def __init__(
+        self,
+        name: str = "fake",
+        duration_ms: int = 300,
+        sample_rate: int = 24000,
+        *,
+        consumes_local_speed: bool = False,
+        has_native_speed: bool = False,
+    ):
         self.name = name
+        self.consumes_local_speed = consumes_local_speed
+        self.has_native_speed = has_native_speed
         self._duration_ms = duration_ms
         self._sample_rate = sample_rate
         self.calls: list[tuple[str, str]] = []

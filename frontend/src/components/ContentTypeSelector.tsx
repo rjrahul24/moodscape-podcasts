@@ -1,4 +1,5 @@
 import type { ContentType } from "../types";
+import { Icon } from "./Icon";
 
 interface Props {
   value: ContentType;
@@ -17,7 +18,8 @@ export function ContentTypeSelector({ value, onChange, disabled }: Props) {
         onClick={() => onChange("podcast")}
         disabled={disabled}
       >
-        🎙️ Podcast
+        <Icon name="mic" size={18} />
+        Podcast
       </button>
       <button
         type="button"
@@ -27,7 +29,8 @@ export function ContentTypeSelector({ value, onChange, disabled }: Props) {
         onClick={() => onChange("sleep_story")}
         disabled={disabled}
       >
-        🌙 Sleep Story
+        <Icon name="moon" size={18} />
+        Sleep Story
       </button>
     </div>
   );

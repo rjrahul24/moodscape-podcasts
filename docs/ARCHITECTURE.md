@@ -61,6 +61,8 @@ app/
                      Job{Created,Progress,View}, AmbientBed
     script_parser.py "[Speaker N]: …" -> ordered turns
     chunker.py       sentence/turn-aware chunking (pure; per-provider char budgets)
+    text_processor.py podcast pacing: turn -> Speech/Pause plan items (pure)
+    emotion.py       shared tone-tag vocabulary + emotion->speed multipliers (pure)
     orchestrator.py  the generation engine for both content types (run)
     jobs.py          in-memory JobStore + ProgressReporter
     ffmpeg_stitch.py disk-based stitch: chunk WAVs -> ffmpeg concat -> WAV/MP3
@@ -87,6 +89,11 @@ app/
 `TTSProvider` (`providers/base.py`) is the single extension point:
 
 - `name: str`
+- **Capability flags** — `consumes_local_speed` (Kokoro, F5: apply a numeric
+  `speed` as an internal rate multiplier) and `has_native_speed` (ElevenLabs:
+  accepts a model-native `speed`, 0.7–1.2). The orchestrator branches on these
+  flags instead of hardcoding provider names, so behaviour stays "split per
+  model" without name checks leaking up the stack.
 - `list_voices() -> list[Voice]` — **cheap, dependency-light** (populates the UI;
   must not import heavy ML libs or load models).
 - `synthesize(text, voice_id, *, output_format, voice_settings=None) -> AudioSegment`
@@ -107,12 +114,26 @@ local providers ignore it (they have a fixed native rate).
 
 The contract signature never changed to carry per-job tuning. Instead the
 orchestrator passes a `voice_settings` dict, and providers read what they
-understand. Today the only key is `speed`: sleep stories pass
-`voice_settings={"speed": 0.85}` and `KokoroProvider`/`F5Provider` use it,
-falling back to their configured default. ElevenLabs is **not** sent a `speed`
-key (the orchestrator only injects it for local providers), so nothing leaks into
-its request body. Chunking and inter-sentence pauses never reach providers — they
-live in the orchestrator.
+understand (ignoring keys they don't). The keys today:
+
+- **`speed`** — sleep stories pass the configured slow speed; podcasts pass a
+  per-chunk jittered speed. Speed-aware local models (`consumes_local_speed`)
+  apply it as a rate multiplier; ElevenLabs (`has_native_speed`) applies it as a
+  model-native speed clamped to 0.7–1.2.
+- **`emotion`** — a recognized podcast tone tag. Kokoro/F5 multiply it into their
+  rate via `core/emotion.py`. ElevenLabs handles it per model: **v2** maps it to a
+  numeric `stability/similarity_boost/style` profile; **v3** performs it as an
+  *inline audio tag* prepended to the chunk text (e.g. `[excited]`).
+- **`content_type`** (`"podcast"`/`"sleep"`) and **`model_id`** — sent to
+  ElevenLabs only. They let the provider pick the right tailoring: an expressive
+  profile for podcasts vs a calm, high-stability profile for sleep, and the
+  selected generation (v2 vs v3, per speaker / per sleep story). Local providers
+  ignore them.
+
+ElevenLabs consumes all four hint keys (`content_type`/`model_id`/`emotion`/
+`speed`) when building the request body, so they never leak into the API's
+`voice_settings`. Chunking, pauses, and pacing never reach providers — they live
+in the orchestrator and `core/text_processor.py`.
 
 ### Sample-rate normalization
 
@@ -140,6 +161,21 @@ REST via httpx. `list_voices()` → `GET /v1/voices` (optionally filtered by
 `VOICE_CATALOG`). `synthesize` → `POST /v1/text-to-speech/{voice}` with
 `output_format`, decoded to an `AudioSegment`. Needs `ELEVENLABS_API_KEY`.
 
+`_prepare` tailors each call to **two axes** — the selected model and the content
+type — both supplied via `voice_settings`:
+
+- **v2** (`eleven_multilingual_v2`): numeric `stability/similarity_boost/style`.
+  A tone tag maps to `EMOTION_PROFILES`; otherwise a per-content-type base
+  profile (`V2_CONTENT_BASE`) — expressive for podcasts, calm/high-stability for
+  sleep. Native `speed` is clamped to 0.7–1.2.
+- **v3** (`eleven_v3`): discrete `stability` (Creative 0.0 / Natural 0.5 / Robust
+  1.0) — Natural for podcasts (Creative when `[excited]`), Robust for sleep — and
+  the tone tag is **performed inline** via `V3_AUDIO_TAGS` (prepended to the text).
+
+The model is chosen from `model_id` (per speaker / per sleep story) or, when
+unset, the provider's per-content default (`ELEVENLABS_PODCAST_MODEL` /
+`ELEVENLABS_SLEEP_MODEL`). `ELEVENLABS_CHUNK_CHARS=2400` stays under v3's 5k cap.
+
 ### Kokoro (local)
 `kokoro.KPipeline(lang_code, repo_id="hexgrad/Kokoro-82M", trf=True, device)`.
 CPU on Apple Silicon (MPS causes bus errors), CUDA if available. American voices
@@ -148,10 +184,20 @@ pipeline. 11 built-in named voices (static list in `kokoro_provider.VOICES`).
 Output 24kHz.
 
 ### F5 (local, voice cloning)
-`f5_tts.api.F5TTS(model="F5TTS_v1_Base", device)` (MPS/CPU), `ema_model` cast to
-fp16. Each reference is preprocessed once with F5's `preprocess_ref_audio_text`
-(clips to ≤12s) and cached. `synthesize` → `model.infer(ref_file, ref_text,
-gen_text, nfe_step, cfg_strength, sway_sampling_coef, speed)`. Output 24kHz.
+`f5_tts.api.F5TTS(model="F5TTS_v1_Base", device)`. **Runtime is config-driven**
+(`F5_DEVICE`/`F5_DTYPE`) and defaults to **CPU + float32** — on Apple Silicon,
+float16-on-MPS is the documented cause of garbled output and unsupported
+flow-matching ops bounce to CPU (so MPS is opt-in: set `F5_DEVICE=mps`, which also
+sets `PYTORCH_ENABLE_MPS_FALLBACK=1`). `_resolve_device` honours `cpu`/`mps`/`cuda`
+and `auto` (CUDA if present, else CPU); the CPU path also `set_num_threads`.
+Inference runs under `torch.inference_mode()`. Defaults: `nfe_step=16` (was 32,
+~halves latency), `cfg_strength=2.0`, `sway_coef=-1.0`, and a tighter
+`F5_CHUNK_CHARS=250` to stay well under F5's ~30s/pass garble edge. Each reference
+is preprocessed once with F5's `preprocess_ref_audio_text` (clips to ≤12s) and
+cached. `synthesize` → `model.infer(...)`. Output 24kHz.
+
+`scripts/bench_f5.py` times CPU-fp32 vs MPS-fp32 on the host so the default device
+can be set from whichever wins.
 
 Voices are discovered from the assets folder (`f5_voice_registry.scan`):
 
@@ -203,6 +249,29 @@ disk under `output/<job_id>/_chunks/`; gaps/pauses are silence WAVs; then
 `ffmpeg -f concat -safe 0` streams them into the master (constant memory). The
 working dir is removed after a successful concat.
 
+## Podcast pacing (conversational realism)
+
+For `kind: "podcast"` with `pacing=True` (the default), `_run_podcast` drives
+planning through `core/text_processor.plan_turn` instead of `chunker.chunk_turn`.
+Each turn becomes an ordered list of `Speech`/`Pause` items:
+
+- **sentence splitting** with a *randomized* intra-sentence micro-pause
+  (`PODCAST_INTRA_SENTENCE_GAP_MS_MIN..MAX`, default 80–220 ms);
+- **explicit `[pause:600]` / `[pause:600ms]`** tags → exact silence at that point;
+- a **leading tone tag** (`[excited]`/`[calm]`/`[sad]`/`[whispering]`/`[neutral]`)
+  lifted off the text and attached as `emotion` (stripped before synthesis; any
+  other `[...]` passes through unchanged);
+- byte-budget splitting still delegated to `chunker.chunk_text`.
+
+The orchestrator also replaces the flat inter-turn gap with a **variable** one
+(`INTER_TURN_GAP_MS` ± `PODCAST_TURN_GAP_JITTER`) and builds per-chunk
+`voice_settings={"emotion", "speed"}` (speed jitter for local providers only).
+All randomness comes from a single `random.Random(job_id)`, so a job renders
+**deterministically**. This is timing + how-words-are-spoken at conversational
+scale only — podcasts never call `sleep_post`/`ambient` (no loudnorm/EQ/fades).
+`pacing=False` reproduces the legacy flat render (one block per turn, fixed gap,
+no emotion).
+
 ## Sleep-story pipeline (the sanctioned processing exception)
 
 For `kind: "sleep_story"` the orchestrator: sentence-chunks the prose →
@@ -236,11 +305,15 @@ The legacy synchronous `POST /api/generate` remains (it adapts `GenerateRequest`
 ## Configuration (Settings)
 
 Loaded from `backend/.env` (see `.env.example`). Highlights: `ELEVENLABS_API_KEY`,
-`ELEVENLABS_MODEL_ID`, `VOICE_CATALOG`, `SEGMENT_OUTPUT_FORMAT`, `FINAL_FORMAT`,
+`ELEVENLABS_MODEL_ID`, `ELEVENLABS_PODCAST_MODEL`, `ELEVENLABS_SLEEP_MODEL`,
+`VOICE_CATALOG`, `SEGMENT_OUTPUT_FORMAT`, `FINAL_FORMAT`,
 `ALSO_EXPORT_MP3`, `INTER_TURN_GAP_MS`, `OUTPUT_DIR`, `TARGET_SAMPLE_RATE`,
-`ASSETS_DIR`, `KOKORO_SPEED`, `F5_SPEED`, `F5_NFE_STEP`, `F5_CFG_STRENGTH`,
-`F5_SWAY_COEF`. **Chunking:** `KOKORO_CHUNK_CHARS`, `F5_CHUNK_CHARS`,
-`ELEVENLABS_CHUNK_CHARS`. **Sleep stories:** `SLEEP_DEFAULT_SPEED`,
+`ASSETS_DIR`, `KOKORO_SPEED`, `F5_SPEED`, `F5_DEVICE`, `F5_DTYPE`, `F5_NFE_STEP`,
+`F5_CFG_STRENGTH`, `F5_SWAY_COEF`. **Chunking:** `KOKORO_CHUNK_CHARS`, `F5_CHUNK_CHARS`,
+`ELEVENLABS_CHUNK_CHARS`. **Podcast pacing:** `PODCAST_DEFAULT_SPEED`,
+`PODCAST_SPEED_JITTER`, `PODCAST_INTRA_SENTENCE_GAP_MS_MIN`,
+`PODCAST_INTRA_SENTENCE_GAP_MS_MAX`, `PODCAST_TURN_GAP_JITTER`. **Sleep stories:**
+`SLEEP_DEFAULT_SPEED`,
 `SLEEP_DEFAULT_PAUSE_MS`, `SLEEP_SAMPLE_RATE`, `SLEEP_CHANNELS`,
 `SLEEP_TARGET_LUFS`, `SLEEP_LOWPASS_HZ`, `SLEEP_FADE_IN_S`, `SLEEP_FADE_OUT_S`,
 `AMBIENT_BED_GAIN_DB`, `AMBIENT_DIR`.
@@ -255,6 +328,20 @@ word-count/duration hint). Both submit to `POST /api/jobs` via `api/jobs.ts`
 (`createJob` + `runJob`, which follows the SSE stream); `ProgressBar` renders live
 progress; `ResultPlayer` plays/downloads the finished episode. `api/client.ts`
 keeps `fetchVoices`. The Vite dev server proxies `/api` → `:8000`.
+
+### Design system
+
+The UI runs on a single token-driven stylesheet, `src/styles/index.css`. All
+color, spacing (4/8 rhythm), radius, elevation, motion, and typography values are
+CSS custom properties under `:root` — components reference tokens (e.g.
+`var(--surface-1)`, `var(--grad-brand)`), never raw hex. The look is a dark-first
+"Calm Studio": layered surfaces, a lavender→indigo brand ramp with a mint accent,
+Lora (display) + Raleway (UI) from Google Fonts, soft elevation, and animated
+progress. `prefers-reduced-motion` is honored globally and the grid collapses to
+one column under 560px. Iconography is a single stroke-based SVG set in
+`components/Icon.tsx` (`<Icon name=… />`, inheriting `currentColor`) — there are
+no emoji glyphs in the UI. To restyle, edit the tokens; to add an icon, add an
+entry to `Icon.tsx`.
 
 ## Testing
 
@@ -285,9 +372,22 @@ No changes to the parser, engine, stitcher, API, or frontend should be required.
 ## Runbook: add an F5 reference voice
 
 Drop `assets/speakers/reference_audio/<name>.wav` and
-`assets/speakers/reference_text/<name>.txt` (verbatim transcript, same stem),
-restart the backend — the voice appears under the F5 provider. See
-`assets/README.md`.
+`assets/speakers/reference_text/<name>.txt` (same stem), restart the backend —
+the voice appears under the F5 provider. See `assets/README.md`.
+
+**Reference contract (clone quality depends on it):**
+
+- The `.wav` is a **clean, single-speaker** clip, mono, ~10–15 s. F5 takes the
+  voice *identity and prosody* from this clip — a slow/rushed/noisy reference
+  produces a slow/rushed/noisy clone.
+- The `.txt` must be the **exact words spoken** in that clip (normal
+  punctuation). F5 aligns acoustic features to this transcript; a mismatch
+  degrades the clone and can cause slurring.
+- Multiple voices **may share the same transcript** if they read the same script
+  — identity comes from the audio, not the text. (The shipped David/Lily/Max/
+  Riley voices do exactly this.)
+- On Apple Silicon, expect F5 to run on **CPU + float32** by default; if the
+  bench (`scripts/bench_f5.py`) shows MPS wins, set `F5_DEVICE=mps`.
 
 ## Runbook: add an ambient bed (sleep stories)
 

@@ -22,7 +22,7 @@ def test_split_sentences_empty():
 
 def test_budget_for_defaults_and_overrides():
     assert chunker.budget_for("kokoro") == 400
-    assert chunker.budget_for("f5") == 350
+    assert chunker.budget_for("f5") == 250
     assert chunker.budget_for("elevenlabs") == 2400
     assert chunker.budget_for("unknown") == chunker.FALLBACK_BUDGET
     assert chunker.budget_for("kokoro", overrides={"kokoro": 123}) == 123

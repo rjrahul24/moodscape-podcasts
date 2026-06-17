@@ -25,6 +25,8 @@ def bootstrap_providers(settings: Settings) -> None:
             api_key=settings.elevenlabs_api_key,
             base_url=settings.elevenlabs_base_url,
             model_id=settings.elevenlabs_model_id,
+            podcast_model=settings.elevenlabs_podcast_model,
+            sleep_model=settings.elevenlabs_sleep_model,
         )
     )
     registry.register(KokoroProvider(speed=settings.kokoro_speed))
@@ -32,6 +34,8 @@ def bootstrap_providers(settings: Settings) -> None:
         F5Provider(
             assets_dir=settings.assets_dir,
             speed=settings.f5_speed,
+            device=settings.f5_device,
+            dtype=settings.f5_dtype,
             nfe_step=settings.f5_nfe_step,
             cfg_strength=settings.f5_cfg_strength,
             sway_coef=settings.f5_sway_coef,

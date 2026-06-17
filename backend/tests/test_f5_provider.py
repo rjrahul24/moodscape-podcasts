@@ -39,12 +39,17 @@ def fake_f5(monkeypatch):
     captured: dict = {}
 
     # torch
+    import contextlib
+
     torch_mod = types.ModuleType("torch")
     backends = types.SimpleNamespace(
         mps=types.SimpleNamespace(is_available=lambda: False)
     )
     torch_mod.backends = backends
+    torch_mod.cuda = types.SimpleNamespace(is_available=lambda: False)
     torch_mod.float16 = "float16"
+    torch_mod.set_num_threads = lambda n: None
+    torch_mod.inference_mode = lambda: contextlib.nullcontext()
     monkeypatch.setitem(sys.modules, "torch", torch_mod)
 
     # f5_tts.api.F5TTS

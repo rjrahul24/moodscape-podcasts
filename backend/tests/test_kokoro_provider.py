@@ -71,3 +71,22 @@ def test_voice_settings_speed_overrides_default(fake_kokoro):
         "hi", "af_heart", output_format="ignored", voice_settings={"speed": 0.85}
     )
     assert provider._pipeline_us.last_speed == 0.85
+
+
+def test_emotion_tag_multiplies_speed(fake_kokoro):
+    provider = KokoroProvider(speed=1.0)
+    provider.synthesize(
+        "hi", "af_heart", output_format="ignored",
+        voice_settings={"speed": 1.0, "emotion": "excited"},
+    )
+    # excited -> 1.06x on top of the base speed
+    assert abs(provider._pipeline_us.last_speed - 1.06) < 1e-6
+
+
+def test_unknown_emotion_leaves_speed_unchanged(fake_kokoro):
+    provider = KokoroProvider(speed=1.0)
+    provider.synthesize(
+        "hi", "af_heart", output_format="ignored",
+        voice_settings={"speed": 0.9, "emotion": "bewildered"},
+    )
+    assert abs(provider._pipeline_us.last_speed - 0.9) < 1e-6

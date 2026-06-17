@@ -2,18 +2,20 @@ import { useEffect, useMemo, useState } from "react";
 import { fetchVoices } from "./api/client";
 import { fetchAmbient, runJob } from "./api/jobs";
 import { ContentTypeSelector } from "./components/ContentTypeSelector";
+import { Icon } from "./components/Icon";
 import { ProgressBar } from "./components/ProgressBar";
 import { ResultPlayer } from "./components/ResultPlayer";
 import { ScriptInput } from "./components/ScriptInput";
 import { SleepStoryConfig } from "./components/SleepStoryConfig";
 import { SpeakerConfig, speakerLabel } from "./components/SpeakerConfig";
-import type {
-  AmbientBed,
-  ContentType,
-  GenerateResult,
-  JobProgress,
-  ProviderVoices,
-  SpeakerVoice,
+import {
+  ELEVENLABS_MODELS,
+  type AmbientBed,
+  type ContentType,
+  type GenerateResult,
+  type JobProgress,
+  type ProviderVoices,
+  type SpeakerVoice,
 } from "./types";
 
 export default function App() {
@@ -26,10 +28,12 @@ export default function App() {
   const [numSpeakers, setNumSpeakers] = useState(2);
   const [speakerVoices, setSpeakerVoices] = useState<Record<string, SpeakerVoice>>({});
   const [scriptText, setScriptText] = useState("");
+  const [pacing, setPacing] = useState(true);
 
   // Sleep-story state
   const [sleepProvider, setSleepProvider] = useState("kokoro");
   const [sleepVoiceId, setSleepVoiceId] = useState("");
+  const [sleepModel, setSleepModel] = useState(ELEVENLABS_MODELS[0].id);
   const [sleepSpeed, setSleepSpeed] = useState(0.85);
   const [sleepPauseMs, setSleepPauseMs] = useState(900);
   const [sleepAmbient, setSleepAmbient] = useState("");
@@ -55,7 +59,11 @@ export default function App() {
   function handleProviderChange(speaker: string, provider: string) {
     setSpeakerVoices((prev) => ({
       ...prev,
-      [speaker]: { provider, voice_id: "" },
+      [speaker]: {
+        provider,
+        voice_id: "",
+        model_id: provider === "elevenlabs" ? ELEVENLABS_MODELS[0].id : undefined,
+      },
     }));
   }
 
@@ -65,6 +73,18 @@ export default function App() {
       [speaker]: {
         provider: prev[speaker]?.provider ?? defaultProvider,
         voice_id: voiceId,
+        model_id: prev[speaker]?.model_id,
+      },
+    }));
+  }
+
+  function handleModelChange(speaker: string, modelId: string) {
+    setSpeakerVoices((prev) => ({
+      ...prev,
+      [speaker]: {
+        provider: prev[speaker]?.provider ?? defaultProvider,
+        voice_id: prev[speaker]?.voice_id ?? "",
+        model_id: modelId,
       },
     }));
   }
@@ -102,7 +122,7 @@ export default function App() {
         const speakers: Record<string, SpeakerVoice> = {};
         for (const s of activeSpeakers) speakers[s] = speakerVoices[s];
         const view = await runJob(
-          { kind: "podcast", script_text: scriptText, speakers },
+          { kind: "podcast", script_text: scriptText, speakers, pacing },
           setProgress,
         );
         setResult(view.result);
@@ -113,6 +133,7 @@ export default function App() {
             prose_text: proseText,
             provider: sleepProvider,
             voice_id: sleepVoiceId,
+            model_id: sleepProvider === "elevenlabs" ? sleepModel : null,
             speed: sleepSpeed,
             pause_ms: sleepPauseMs,
             ambient_bed: sleepAmbient || null,
@@ -134,12 +155,17 @@ export default function App() {
   return (
     <div className="app">
       <header className="app-head">
-        <h1>🎙️ Moodscape Studio</h1>
-        <p>
-          {isSleep
-            ? "Paste a full sleep story, pick a calming voice, and render a sleep-ready episode."
-            : "Paste a multi-speaker script, assign a model + voice to each speaker, generate the episode."}
-        </p>
+        <span className="app-mark" aria-hidden="true">
+          <Icon name="waveform" size={26} />
+        </span>
+        <div>
+          <h1>Moodscape Studio</h1>
+          <p>
+            {isSleep
+              ? "Paste a full sleep story, pick a calming voice, and render a sleep-ready episode."
+              : "Paste a multi-speaker script, assign a model + voice to each speaker, generate the episode."}
+          </p>
+        </div>
       </header>
 
       <ContentTypeSelector
@@ -149,9 +175,12 @@ export default function App() {
       />
 
       {voicesError && (
-        <div className="banner error">
-          Couldn’t load voices: {voicesError}
-          <span className="banner-hint">Is the backend running?</span>
+        <div className="banner error" role="alert">
+          <Icon name="alert" size={18} />
+          <div className="banner-body">
+            <span>Couldn’t load voices: {voicesError}</span>
+            <span className="banner-hint">Is the backend running?</span>
+          </div>
         </div>
       )}
 
@@ -161,12 +190,14 @@ export default function App() {
           ambientBeds={ambientBeds}
           provider={sleepProvider}
           voiceId={sleepVoiceId}
+          modelId={sleepModel}
           speed={sleepSpeed}
           pauseMs={sleepPauseMs}
           ambientBed={sleepAmbient}
           proseText={proseText}
           onProviderChange={handleSleepProviderChange}
           onVoiceChange={setSleepVoiceId}
+          onModelChange={setSleepModel}
           onSpeedChange={setSleepSpeed}
           onPauseChange={setSleepPauseMs}
           onAmbientChange={setSleepAmbient}
@@ -181,13 +212,24 @@ export default function App() {
             speakerVoices={speakerVoices}
             onProviderChange={handleProviderChange}
             onVoiceChange={handleVoiceChange}
+            onModelChange={handleModelChange}
           />
-          <ScriptInput value={scriptText} onChange={setScriptText} />
+          <ScriptInput
+            value={scriptText}
+            onChange={setScriptText}
+            pacing={pacing}
+            onPacingChange={setPacing}
+          />
         </>
       )}
 
       <div className="actions">
         <button className="generate" onClick={handleGenerate} disabled={!canGenerate}>
+          {loading ? (
+            <Icon name="loader" size={18} className="spin" />
+          ) : (
+            <Icon name={isSleep ? "moon" : "sparkles"} size={18} />
+          )}
           {loading ? "Generating…" : isSleep ? "Generate sleep story" : "Generate podcast"}
         </button>
         {!canGenerate && !loading && (
@@ -200,7 +242,12 @@ export default function App() {
       </div>
 
       {loading && progress && <ProgressBar progress={progress} />}
-      {error && <div className="banner error">{error}</div>}
+      {error && (
+        <div className="banner error" role="alert">
+          <Icon name="alert" size={18} />
+          <div className="banner-body">{error}</div>
+        </div>
+      )}
       {result && <ResultPlayer result={result} />}
     </div>
   );
