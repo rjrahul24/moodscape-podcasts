@@ -7,7 +7,7 @@ from app.core.text_processor import Pause, Speech, extract_emotion, plan_turn
 GAP_MIN, GAP_MAX = 80, 220
 
 
-def _plan(text, *, provider="elevenlabs", max_chars=2400, seed=0):
+def _plan(text, *, provider="elevenlabs", max_chars=2400, seed=0, inline_sfx=False):
     return plan_turn(
         text,
         provider=provider,
@@ -15,6 +15,7 @@ def _plan(text, *, provider="elevenlabs", max_chars=2400, seed=0):
         rng=random.Random(seed),
         gap_min_ms=GAP_MIN,
         gap_max_ms=GAP_MAX,
+        inline_sfx=inline_sfx,
     )
 
 
@@ -88,3 +89,27 @@ def test_deterministic_for_same_seed():
     a = _plan("One. Two. Three. Four.", seed=42)
     b = _plan("One. Two. Three. Four.", seed=42)
     assert a == b
+
+
+def test_mindfulness_tone_word_is_recognized():
+    emotion, rest = extract_emotion("[soothing] Let go now.")
+    assert emotion == "soothing"
+    assert rest == "Let go now."
+
+
+def test_sfx_tag_becomes_pause_by_default():
+    # Without inline-SFX support, [deep_breath] turns into a short pause and the
+    # literal tag never reaches a provider.
+    items = _plan("Settle in. [deep_breath] And rest.")
+    kinds = [type(it).__name__ for it in items]
+    assert kinds == ["Speech", "Pause", "Speech"]
+    pause = next(it for it in items if isinstance(it, Pause))
+    assert pause.ms == 600  # SFX_PAUSE_MS["deep_breath"]
+    assert all("[deep_breath]" not in s.text for s in items if isinstance(s, Speech))
+
+
+def test_sfx_tag_kept_inline_when_provider_performs_it():
+    # An inline-SFX-capable provider keeps the tag in the text (no extra pause).
+    items = _plan("Settle in [deep_breath] and rest.", inline_sfx=True)
+    assert all(not isinstance(it, Pause) for it in items)
+    assert any("[deep_breath]" in it.text for it in items if isinstance(it, Speech))

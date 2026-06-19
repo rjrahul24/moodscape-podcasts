@@ -9,7 +9,7 @@ Turn pasted text into finished mindfulness audio. Two content types:
   pauses, loudness normalization, soft EQ/compression, fades, and an optional
   ambient bed — exported 44.1 kHz **stereo**.
 
-**Three TTS models, pickable per speaker/voice** (podcasts can mix them in one
+**Four TTS models, pickable per speaker/voice** (podcasts can mix them in one
 episode):
 
 | Model | Type | Voices |
@@ -17,6 +17,7 @@ episode):
 | **ElevenLabs** | Cloud API | Your account's voices (needs an API key) |
 | **Kokoro** | Local | 11 built-in named voices |
 | **F5** | Local | Zero-shot voice cloning from your own reference clips |
+| **CosyVoice3** | Local (MLX, Apple Silicon) | Cloning + **Instruct Mode** for calm sleep delivery; `uv sync --extra mlx` |
 
 Providers are pluggable behind a single `TTSProvider` interface — new ones drop
 in without touching the parser, orchestrator, API, or frontend (see
@@ -36,7 +37,7 @@ out or exhaust memory).
 └──────────┘                       └───────────────────────────────┘
                                           │ TTSProvider (registry)
                                           ▼
-                                  ElevenLabs · Kokoro · F5
+                                  ElevenLabs · Kokoro · F5 · CosyVoice3
 ```
 
 ## Layout
@@ -83,6 +84,9 @@ one without the other.
 cd backend
 cp .env.example .env          # then fill in ELEVENLABS_API_KEY / VOICE_CATALOG if using ElevenLabs
 uv sync --extra dev           # create venv + install deps (incl. torch/kokoro/f5 — multi-GB, slow)
+uv sync --extra mlx           # OPTIONAL, Apple Silicon only: adds CosyVoice3 (mlx-audio-plus)
+uv sync --extra qc            # OPTIONAL: long-form QC (Whisper-WER + speaker drift); enable with ENABLE_QC
+uv sync --extra clean         # OPTIONAL: denoise uploaded reference clips (noisereduce)
 uv run pytest                 # run the test suite (uses fakes; no model downloads)
 uv run uvicorn app.main:app --reload   # serves on http://localhost:8000
 ```
@@ -92,21 +96,42 @@ uv run uvicorn app.main:app --reload   # serves on http://localhost:8000
 > default to **CPU + float32** (reliable; `float16`-on-MPS garbles F5 output). To
 > try Metal, set `F5_DEVICE=mps` after checking `backend/scripts/bench_f5.py`
 > (`uv run python scripts/bench_f5.py`) to see whether MPS actually wins.
+>
+> **CosyVoice3 is opt-in and Apple-Silicon-only.** It needs `uv sync --extra mlx`;
+> without it the model still shows in the dropdowns but generation reports a clear
+> error. First use downloads the model (~1.1 GB). It clones from the same F5
+> reference voices and uses **Instruct Mode** for a calm, hypnotic sleep delivery
+> driven by `COSYVOICE_SLEEP_INSTRUCT` (overridable per story in the UI). Compare
+> it against F5 with `uv run python scripts/bench_cosyvoice.py`.
+
+> **Check long-form performance on your machine.** `uv run python scripts/bench_longform.py`
+> synthesizes increasingly long narration per local provider and reports real-time
+> factor (RTF) and peak memory. Use it to confirm 30–90 min jobs stay faster than
+> real time and memory stays bounded; if RTF creeps up with length, set `MLX_CACHE_MB`.
 
 Key `.env` settings:
 
 | Variable | What it does |
 | --- | --- |
 | `ELEVENLABS_API_KEY` | Your ElevenLabs key (required to fetch voices / generate). |
-| `ELEVENLABS_PODCAST_MODEL` / `ELEVENLABS_SLEEP_MODEL` | Default ElevenLabs model per content type (`eleven_multilingual_v2` or `eleven_v3`). The UI overrides this per speaker / per sleep story. v3 needs account access. |
+| `ELEVENLABS_PODCAST_MODEL` / `ELEVENLABS_SLEEP_MODEL` | Default ElevenLabs model per content type. Both default to **`eleven_v3`** (expressive, performs inline audio tags); set to `eleven_multilingual_v2` for the stable fallback. The UI overrides this per speaker / per sleep story. v3 needs account access. |
+| `ELEVENLABS_USE_SPEAKER_BOOST` / `ELEVENLABS_TEXT_NORMALIZATION` | Send `use_speaker_boost` (default `true` — intimate proximity) and `apply_text_normalization` (default `auto` — spells numbers server-side) on every request. |
 | `F5_DEVICE` / `F5_DTYPE` | F5 runtime: `auto`/`cpu`/`mps`/`cuda` and `float32`/`float16`. Default `auto`+`float32` → CPU on Apple Silicon. |
+| `COSYVOICE_MODEL` / `COSYVOICE_SLEEP_INSTRUCT` | CosyVoice3 MLX model id and the default sleep delivery directive (Instruct Mode). The UI overrides the directive per story (`style_prompt`). Apple Silicon only. |
+| `MLX_CACHE_MB` | Cap MLX's Metal buffer cache (MB) so a long (30–90 min) job doesn't balloon into SSD swap. `0` (default) keeps MLX's own default; `1024` holds peak memory steady. |
+| `WARMUP_PROVIDERS` | If `true`, pre-compile kernels at startup with a silent dummy synthesis so the first real generate skips the ~5× JIT penalty. Off by default (adds boot latency, needs the heavy ML libs). |
+| `ENABLE_QC` | If `true`, run long-form quality control after each render — transcript word error rate (WER) and cloned-voice drift (speaker similarity). Off by default (≈doubles wall-clock); needs `uv sync --extra qc`. |
+| `QC_WHISPER_MLX_REPO` / `QC_WHISPER_FASTER_SIZE` / `QC_SIM_THRESHOLD` | QC tuning: Apple-Silicon Whisper repo, CPU faster-whisper model size, and the cosine-similarity threshold below which a window is flagged as drift. |
+| `REFERENCE_CLIP_SAMPLE_RATE` / `REFERENCE_CLIP_MAX_SECONDS` | How uploaded reference clips are cleaned before cloning: target sample rate and the length cap (cloners need only a short window). |
 | `VOICE_CATALOG` | JSON list of voices for the dropdown, e.g. `[{"id":"...","label":"Rachel"}]`. Empty `[]` offers every voice on the account. |
 | `SEGMENT_OUTPUT_FORMAT` | Per-segment format requested from the provider. Best quality (Pro tier): `wav_44100`. Any tier: `mp3_44100_128`. |
 | `FINAL_FORMAT` | Master export format: `wav` (lossless) or `mp3`. |
 | `INTER_TURN_GAP_MS` | Silence between speaker turns (podcasts). |
-| `KOKORO_CHUNK_CHARS` / `F5_CHUNK_CHARS` / `ELEVENLABS_CHUNK_CHARS` | Max characters per synthesis chunk (keeps Kokoro under its token cap, F5 under ~30s). |
+| `CHUNK_EDGE_FADE_MS` | Short edge fade applied to each chunk WAV to remove concat-boundary clicks (default `8`; `0` disables). |
+| `KOKORO_CHUNK_CHARS` / `F5_CHUNK_CHARS` / `COSYVOICE_CHUNK_CHARS` / `ELEVENLABS_CHUNK_CHARS` | Max characters per synthesis chunk (keeps Kokoro under its token cap, F5/CosyVoice under ~30s). |
 | `SLEEP_DEFAULT_SPEED` / `SLEEP_DEFAULT_PAUSE_MS` | Sleep-story defaults (overridable per request in the UI). |
-| `SLEEP_TARGET_LUFS` / `SLEEP_LOWPASS_HZ` / `SLEEP_FADE_*` / `AMBIENT_BED_GAIN_DB` | Sleep mastering: loudness target, EQ roll-off, fades, ambient level. |
+| `SLEEP_RAMP_SPEED_END_FACTOR` / `SLEEP_RAMP_PAUSE_SCALE` | Progressive ramp-down: how far speed eases (×, default 0.94) and how much pauses lengthen (×, default 1.6) by the end of a story. The UI toggles ramp per story. |
+| `SLEEP_TARGET_LUFS` / `SLEEP_TRUE_PEAK_DB` / `SLEEP_LOWPASS_HZ` / `SLEEP_FADE_*` / `AMBIENT_BED_GAIN_DB` | Sleep mastering: loudness target (default −18 LUFS), true-peak ceiling (−2 dBTP), EQ roll-off, fades, ambient level. |
 
 ### Frontend
 
@@ -121,16 +146,28 @@ Open http://localhost:5173 and choose a content type at the top:
 - **Podcast** — pick the number of speakers, choose a **model and voice** for
   each (ElevenLabs speakers also get a **v2 / v3** engine picker), paste your
   `[Speaker N]:` script, and click **Generate podcast**. Leave **Natural pacing**
-  on (default) for sentence pauses, varied timing, and inline tone/pause tags;
+  on (default) for sentence pauses, varied timing, and inline tags — `[pause:600]`
+  silence, `[breath]`/`[deep_breath]`/`[sigh]` breaths, and tone tags
+  `[excited]`/`[calm]`/`[soothing]`/`[reflective]`/`[warm]`/`[sad]`/`[whispering]`;
   turn it off for a flat, evenly-spaced render.
-- **Sleep Story** — pick one **model and voice** (ElevenLabs adds the **v2 / v3**
-  engine picker), set the **speed** and **inter-sentence pause**, optionally
-  choose an **ambient bed**, paste your story as plain prose, and click
+- **Sleep Story** — pick one **model and voice** (ElevenLabs adds the **v3 / v2**
+  engine picker — v3 is the default; CosyVoice3 adds a **Delivery style** field —
+  its Instruct-Mode directive drives the pace, so the speed slider is ignored), set
+  the **speed** and **inter-sentence pause**, leave **Progressive ramp-down** on to
+  gently decelerate toward sleep, optionally choose an **ambient bed**, paste your
+  story as plain prose, and click
   **Generate sleep story**. The chosen voice now narrates calmly at the model
   level, then the sleep mastering chain runs on top.
 
 Either way a progress bar tracks the job live until the player + download links
 appear.
+
+**Clone a voice from the UI.** The **Clone a voice** panel uploads a short clip
+(≈10–30 s): it's denoised and trimmed server-side and added to **F5** and
+**CosyVoice3** so it appears in their voice dropdowns. A transcript is recommended
+(cloning conditions on it); leave it blank to auto-transcribe with local Whisper
+(`uv sync --extra qc`). Clips can still be dropped into `assets/speakers/` by hand
+instead. Clone only voices you have the right to use.
 
 ## Sleep Stories
 
@@ -165,8 +202,10 @@ assets/speakers/reference_audio/<name>.wav    # 10–12 s, mono (any rate)
 assets/speakers/reference_text/<name>.txt     # verbatim transcript of that clip
 ```
 
-Restart the backend and the voice appears under the **F5** model in each
-speaker's voice dropdown. Both files are required; see [assets/README.md](assets/README.md).
+Restart the backend and the voice appears under the **F5** model — and, on Apple
+Silicon with `--extra mlx`, the **CosyVoice3** model — in each voice dropdown
+(both reuse these reference pairs). Both files are required; see
+[assets/README.md](assets/README.md).
 
 ## Script format
 
@@ -191,7 +230,8 @@ inline:
 | Tag | Effect |
 | --- | --- |
 | `[pause:600]` or `[pause:600ms]` | Insert silence (here, 600 ms) at that point in the turn. |
-| `[excited]` `[calm]` `[sad]` `[whispering]` `[neutral]` | Set the tone for the rest of that line. Local voices (Kokoro/F5) adjust speaking rate; ElevenLabs **v2** maps it to native voice settings, **v3** performs it as an inline audio tag. |
+| `[excited]` `[calm]` `[sad]` `[whispering]` `[warm]` `[soothing]` `[reflective]` `[neutral]` | Set the tone for the rest of that line. Local voices (Kokoro/F5) adjust speaking rate; ElevenLabs **v2** maps it to native voice settings, **v3** performs it as an inline audio tag. |
+| `[laughs]` `[soft laugh]` `[sighs]` `[exhales softly]` `[deep breath]` … | **ElevenLabs v3 only** — performed mid-line cues. v3 acts them out; v2 (and the recognized-tag set above aside) strips unknown bracket tags so they're never spoken. Use sparingly. |
 
 ```
 [Speaker 1]: That's a great point. [pause:500] I hadn't thought of it that way.

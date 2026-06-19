@@ -14,13 +14,14 @@ def test_build_filtergraph_contains_expected_filters():
         fade_in_s=2.0,
         fade_out_s=5.0,
         lowpass_hz=8000,
-        target_lufs=-20.0,
+        target_lufs=-18.0,
+        true_peak_db=-2.0,
         sample_rate=44100,
         channels=2,
     )
     assert "acompressor" in af
     assert "lowpass=f=8000" in af
-    assert "loudnorm=I=-20.0" in af
+    assert "loudnorm=I=-18.0:TP=-2.0" in af
     assert "afade=t=in:st=0:d=2.0" in af
     assert "afade=t=out:st=55.000:d=5.0" in af
     assert "channel_layouts=stereo" in af
@@ -32,7 +33,8 @@ def test_build_filtergraph_clamps_fade_out_for_short_audio():
         fade_in_s=2.0,
         fade_out_s=5.0,
         lowpass_hz=8000,
-        target_lufs=-20.0,
+        target_lufs=-18.0,
+        true_peak_db=-2.0,
         sample_rate=44100,
         channels=2,
     )

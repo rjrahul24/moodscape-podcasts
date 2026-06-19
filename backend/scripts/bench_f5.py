@@ -17,11 +17,15 @@ Note: each combo downloads/loads the model once, so the first run is slower.
 from __future__ import annotations
 
 import argparse
+import sys
 import time
 from pathlib import Path
 
-from app.config import get_settings
-from app.providers.f5_provider import F5Provider
+# Make the backend package importable when run as `python scripts/bench_*.py`.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from app.config import get_settings  # noqa: E402
+from app.providers.f5_provider import F5Provider  # noqa: E402
 
 # A ~20-word sentence with the kind of clauses that expose slurring.
 _SENTENCE = (

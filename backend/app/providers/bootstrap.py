@@ -13,6 +13,7 @@ from __future__ import annotations
 from app.config import Settings
 
 from . import registry
+from .cosyvoice_provider import CosyVoiceProvider
 from .elevenlabs_provider import ElevenLabsProvider
 from .f5_provider import F5Provider
 from .kokoro_provider import KokoroProvider
@@ -27,6 +28,8 @@ def bootstrap_providers(settings: Settings) -> None:
             model_id=settings.elevenlabs_model_id,
             podcast_model=settings.elevenlabs_podcast_model,
             sleep_model=settings.elevenlabs_sleep_model,
+            use_speaker_boost=settings.elevenlabs_use_speaker_boost,
+            text_normalization=settings.elevenlabs_text_normalization,
         )
     )
     registry.register(KokoroProvider(speed=settings.kokoro_speed))
@@ -41,3 +44,14 @@ def bootstrap_providers(settings: Settings) -> None:
             sway_coef=settings.f5_sway_coef,
         )
     )
+    cosyvoice = CosyVoiceProvider(
+        assets_dir=settings.assets_dir,
+        model=settings.cosyvoice_model,
+        cache_mb=settings.mlx_cache_mb,
+    )
+    registry.register(cosyvoice)
+
+    # Optionally pre-compile kernels so the first real generate is fast. Off by
+    # default; best-effort, so a missing MLX install just no-ops.
+    if settings.warmup_providers:
+        cosyvoice.warmup()

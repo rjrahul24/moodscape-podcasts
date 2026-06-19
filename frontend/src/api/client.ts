@@ -1,4 +1,9 @@
-import type { GenerateRequest, GenerateResult, ProviderVoices } from "../types";
+import type {
+  GenerateRequest,
+  GenerateResult,
+  ProviderVoices,
+  ReferenceVoiceCreated,
+} from "../types";
 
 export async function parseError(response: Response): Promise<string> {
   try {
@@ -12,6 +17,23 @@ export async function parseError(response: Response): Promise<string> {
 
 export async function fetchVoices(): Promise<ProviderVoices[]> {
   const response = await fetch("/api/voices");
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
+export async function uploadReferenceVoice(input: {
+  name: string;
+  audio: File;
+  transcript?: string;
+}): Promise<ReferenceVoiceCreated> {
+  const form = new FormData();
+  form.append("name", input.name);
+  form.append("audio", input.audio);
+  if (input.transcript?.trim()) form.append("transcript", input.transcript.trim());
+  const response = await fetch("/api/voices/reference", {
+    method: "POST",
+    body: form,
+  });
   if (!response.ok) throw new Error(await parseError(response));
   return response.json();
 }

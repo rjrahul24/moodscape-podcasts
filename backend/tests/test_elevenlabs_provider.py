@@ -6,8 +6,13 @@ import pytest
 import respx
 from pydub import AudioSegment
 
+from app.core.emotion import EMOTIONS
 from app.core.errors import ProviderError
-from app.providers.elevenlabs_provider import ElevenLabsProvider
+from app.providers.elevenlabs_provider import (
+    EMOTION_PROFILES,
+    V3_AUDIO_TAGS,
+    ElevenLabsProvider,
+)
 
 BASE = "https://api.elevenlabs.io"
 
@@ -77,9 +82,12 @@ def test_v2_emotion_tag_maps_to_numeric_profile():
         "similarity_boost": 0.85,
         "style": 0.80,
         "speed": 1.02,
+        "use_speaker_boost": True,
     }
     assert "emotion" not in body["voice_settings"]
     assert "content_type" not in body["voice_settings"]
+    # Server-side normalization is requested by default.
+    assert body["apply_text_normalization"] == "auto"
 
 
 @respx.mock
@@ -93,8 +101,8 @@ def test_v2_native_speed_is_clamped():
         voice_settings={"content_type": "sleep", "speed": 0.4},
     )
     body = json.loads(route.calls.last.request.content)
-    # Sleep base profile (calm) + native speed clamped up to the 0.7 floor.
-    assert body["voice_settings"]["stability"] == 0.88
+    # Sleep base profile (research sweet spot) + native speed clamped to 0.7 floor.
+    assert body["voice_settings"]["stability"] == 0.70
     assert body["voice_settings"]["speed"] == 0.7
 
 
@@ -139,11 +147,12 @@ def test_no_voice_settings_uses_podcast_base_profile():
     provider = ElevenLabsProvider("test-key", base_url=BASE)
     provider.synthesize_bytes("hi", "v1", output_format="wav_44100")
     body = json.loads(route.calls.last.request.content)
-    # No hints -> v2 podcast base profile (expressive default).
+    # No hints -> v2 podcast base profile (expressive but unforced: style 0.0).
     assert body["voice_settings"] == {
-        "stability": 0.45,
+        "stability": 0.50,
         "similarity_boost": 0.80,
-        "style": 0.45,
+        "style": 0.0,
+        "use_speaker_boost": True,
     }
 
 
@@ -176,3 +185,97 @@ def test_missing_key_raises_before_request():
     with pytest.raises(ProviderError) as exc:
         provider.list_voices()
     assert exc.value.status_code == 401
+
+
+# ── new behaviour: tags, continuity, speaker_boost, normalization, seed ─────────
+
+
+def test_every_emotion_has_v2_profile_and_v3_tag():
+    """The shared tone vocabulary and the provider maps must not drift apart."""
+    for label in EMOTIONS:
+        assert label in EMOTION_PROFILES, f"missing v2 profile for {label!r}"
+        assert label in V3_AUDIO_TAGS, f"missing v3 tag entry for {label!r}"
+
+
+@respx.mock
+def test_v2_strips_bracket_tags_from_text():
+    route = respx.post(f"{BASE}/v1/text-to-speech/v1").mock(
+        return_value=httpx.Response(200, content=b"FAKEAUDIO")
+    )
+    provider = ElevenLabsProvider("test-key", base_url=BASE)
+    provider.synthesize_bytes(
+        "[warmly] Breathe in [exhales softly] and out.", "v1",
+        output_format="wav_44100",
+        voice_settings={"content_type": "podcast"},  # v2 default model
+    )
+    body = json.loads(route.calls.last.request.content)
+    # v2 cannot perform inline tags, so they are removed (never spoken).
+    assert body["text"] == "Breathe in and out."
+
+
+@respx.mock
+def test_v3_keeps_inline_tags_in_text():
+    route = respx.post(f"{BASE}/v1/text-to-speech/v1").mock(
+        return_value=httpx.Response(200, content=b"FAKEAUDIO")
+    )
+    provider = ElevenLabsProvider("test-key", base_url=BASE)
+    provider.synthesize_bytes(
+        "Breathe in [exhales softly] and out.", "v1",
+        output_format="wav_44100",
+        voice_settings={"content_type": "podcast", "model_id": "eleven_v3"},
+    )
+    body = json.loads(route.calls.last.request.content)
+    # v3 performs the cue, so the tag stays in the text verbatim.
+    assert body["text"] == "Breathe in [exhales softly] and out."
+
+
+@respx.mock
+def test_continuity_and_seed_are_top_level_fields():
+    route = respx.post(f"{BASE}/v1/text-to-speech/v1").mock(
+        return_value=httpx.Response(200, content=b"FAKEAUDIO")
+    )
+    provider = ElevenLabsProvider("test-key", base_url=BASE)
+    provider.synthesize_bytes(
+        "the present moment.", "v1", output_format="wav_44100",
+        voice_settings={
+            "content_type": "sleep",
+            "previous_text": "settle into",
+            "next_text": "you are safe",
+            "seed": 42,
+        },
+    )
+    body = json.loads(route.calls.last.request.content)
+    # Continuity + seed are request-level fields, not voice_settings keys.
+    assert body["previous_text"] == "settle into"
+    assert body["next_text"] == "you are safe"
+    assert body["seed"] == 42
+    assert "previous_text" not in body["voice_settings"]
+    assert "seed" not in body["voice_settings"]
+
+
+@respx.mock
+def test_speaker_boost_and_normalization_are_configurable():
+    route = respx.post(f"{BASE}/v1/text-to-speech/v1").mock(
+        return_value=httpx.Response(200, content=b"FAKEAUDIO")
+    )
+    provider = ElevenLabsProvider(
+        "test-key", base_url=BASE, use_speaker_boost=False, text_normalization="off"
+    )
+    provider.synthesize_bytes("hi", "v1", output_format="wav_44100")
+    body = json.loads(route.calls.last.request.content)
+    assert body["voice_settings"]["use_speaker_boost"] is False
+    assert body["apply_text_normalization"] == "off"
+
+
+@respx.mock
+def test_expanded_emotion_maps_to_profile():
+    route = respx.post(f"{BASE}/v1/text-to-speech/v1").mock(
+        return_value=httpx.Response(200, content=b"FAKEAUDIO")
+    )
+    provider = ElevenLabsProvider("test-key", base_url=BASE)
+    provider.synthesize_bytes(
+        "rest now.", "v1", output_format="wav_44100",
+        voice_settings={"emotion": "soothing", "content_type": "podcast"},
+    )
+    body = json.loads(route.calls.last.request.content)
+    assert body["voice_settings"]["stability"] == EMOTION_PROFILES["soothing"]["stability"]

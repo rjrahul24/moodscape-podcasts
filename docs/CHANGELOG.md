@@ -3,6 +3,226 @@
 Append-only log of notable changes and the decisions behind them. Newest first.
 Every change should add an entry (see `CLAUDE.md` → Documentation discipline).
 
+## 2026-06-19 — Phase 5: ElevenLabs expressive podcasts + calm sleep
+
+Reworked the ElevenLabs path per two research briefs to make podcasts more
+expressive and sleep stories calmer. ElevenLabs-only; local providers and the
+sleep-vs-podcast processing boundary are unchanged. Spec:
+`docs/superpowers/specs/2026-06-19-elevenlabs-expressive-podcast-calm-sleep-design.md`.
+
+- **v3 is now the default** for both content types (`elevenlabs_podcast_model` /
+  `elevenlabs_sleep_model` → `eleven_v3`); v2 stays selectable. The UI model
+  dropdown lists v3 first. v3 performs inline audio tags, which drives the rest.
+- **Model-aware tags.** Arbitrary `[bracketed]` cues (`[warmly]`, `[exhales
+  softly]`, breaths) now pass through to v3 verbatim (performed); v2 strips all
+  bracket tags before the read so they are never spoken. ElevenLabs now sets
+  `accepts_inline_sfx=True` (superseding Phase 4's "no provider sets it" note), so
+  breath/SFX tags stay in the text on the v3 path instead of becoming silences.
+- **Cross-chunk continuity.** New `TTSProvider.accepts_continuity` flag (True on
+  ElevenLabs). The orchestrator hands each chunk the trailing/leading text of its
+  neighbours as `previous_text` / `next_text` (bracket tags stripped) so prosody
+  flows across boundaries. An optional request `seed` rides along for reproducible
+  re-renders. Both are top-level request-body fields, carried via `voice_settings`
+  — no `synthesize` signature change.
+- **`use_speaker_boost` + `apply_text_normalization`.** Every request now sends
+  `use_speaker_boost` (configurable, default on — intimate proximity) and
+  `apply_text_normalization` (default `"auto"` — spells numbers server-side).
+- **Boundary smoothing.** `ffmpeg_stitch.segment_to_wav_file` applies a short
+  equal-power edge fade (`chunk_edge_fade_ms`, default 8 ms) to each chunk WAV,
+  removing concat-boundary clicks. Chosen over the research's 500 ms overlapping
+  crossfade, which would break the constant-memory concat and muddy conversational
+  turns / sleep pauses.
+- **Tuned profiles.** v2 podcast `style` 0.45 → 0.0 (unforced dialogue); v2 sleep
+  `stability` 0.88 → 0.70 (research sweet spot — warm, not a robotic drone); v3
+  podcast `style` 0.5 → 0.0.
+- **Sleep ramp-down + normalization.** New `SleepStoryRequest.ramp` (default on):
+  per-chunk speed eases toward `baseline × sleep_ramp_speed_end_factor` (0.94) and
+  inter-sentence pauses grow toward `sleep_ramp_pause_scale` (1.6) — a pure,
+  deterministic function of chunk position. New `core/sleep_text.py` spells
+  standalone integers before synthesis. Loudness retargeted to −18 LUFS /
+  −2 dBTP (`sleep_target_lufs`, new `sleep_true_peak_db`). A "Progressive
+  ramp-down" toggle was added to the sleep UI.
+
+## 2026-06-19 — Phase 4: richer mindfulness markup (tone words + breath/SFX)
+
+Wellness scripts want a gentler vocabulary than the original five tone tags, plus
+a way to mark breaths. Both are now in the sanctioned podcast pacing layer — they
+shape *timing and how words are spoken*, never meditation-style audio processing.
+
+- **Tone words** — `core/emotion.py` adds `soothing`, `reflective`, `warm` to the
+  recognized set (with speaking-rate multipliers for local models). ElevenLabs
+  maps them too: calm-leaning `EMOTION_PROFILES` (v2) and `V3_AUDIO_TAGS` entries
+  (v3). They flow through the existing per-provider `voice_settings` routing — no
+  new code path.
+- **Breath / SFX tags** — `[breath]`, `[deep_breath]`, `[sigh]` (with stand-in
+  silence durations in `SFX_PAUSE_MS`). `text_processor.plan_turn` gained an
+  `inline_sfx` flag: when False (every current provider) the tag is rewritten to a
+  short `[pause:N]` so the beat lands and no model speaks the literal tag; when
+  True the tag is left in the text for the model to perform.
+- **New capability flag** `TTSProvider.accepts_inline_sfx` (default False) — the
+  orchestrator passes it into `plan_turn` per the turn's provider, branching on
+  the flag, not a provider name. The frontend `ScriptInput` legend now lists the
+  new tags.
+
+Scope note: the plan floated "CosyVoice3 instruct / EL v3 perform tags inline," but
+reading the providers showed CosyVoice3's delivery is instruct-driven (no inline
+tags) and ElevenLabs' inline-tag support is v3-only (a per-request distinction the
+class-level flag can't express, and whose exact tag vocabulary isn't verifiable
+against the live API here). So no current provider sets `accepts_inline_sfx`; the
+universal short-pause mapping is the shipped behavior, and the flag + pass-through
+branch (unit-tested) stand ready for a future provider whose inline vocabulary is
+confirmed. Sleep prose isn't markup-processed — these tags apply to podcasts.
+
+## 2026-06-19 — Phase 3: reference-clip upload + hygiene (clone from the UI)
+
+Cloning worked but reference clips were filesystem-only — you had to drop
+`.wav`/`.txt` pairs into `assets/speakers/` by hand. Now you can upload a clip from
+the UI and it's cleaned before it lands in the registry.
+
+- **`core/ref_clean.py`** — clip hygiene pipeline: mono downmix → resample →
+  energy-based silence trim → optional denoise (`noisereduce`) → length cap →
+  WAV export. Baseline uses only pydub (a base dep), so upload works without any
+  extra; denoise degrades to a no-op + note when the extra isn't installed. Each
+  step returns a note for the UI.
+- **`POST /api/voices/reference`** (multipart: `name`, `audio`, optional
+  `transcript`) — cleans the clip and persists it via
+  `reference_voice_registry.save()` to the existing
+  `reference_audio/<slug>.wav` + `reference_text/<slug>.txt` layout, so **F5 and
+  CosyVoice3 pick it up with no provider changes**. A transcript is required
+  (cloners condition on it); if omitted we reuse the Phase 2 local Whisper
+  (`qc.transcribe`) and return a clear 422 if that isn't available.
+- **Registry** gained `slugify()` and `save()` (it owns the on-disk layout).
+  New `ReferenceVoiceCreated` model. New settings `REFERENCE_CLIP_SAMPLE_RATE`
+  (24 kHz) and `REFERENCE_CLIP_MAX_SECONDS` (30 s).
+- **Frontend** — new `AddVoice` panel ("Clone a voice"): name + file + optional
+  transcript, with per-step hygiene notes on success; `App` re-fetches `/api/voices`
+  so the new voice appears in every dropdown.
+- New optional extra: `uv sync --extra clean` (`noisereduce`).
+
+Scope note: the shipped denoiser is `noisereduce` (reliable, light). DeepFilterNet3
+(Doc A's CoreML/ANE suggestion) can slot into `_denoise` later behind the same
+graceful-degradation contract; the energy-based silence trim stands in for a
+learned VAD for now.
+
+## 2026-06-19 — Phase 2: long-form drift QC (Whisper-WER + speaker similarity)
+
+The two failure modes that creep into 30–90 min local renders — hallucinated/
+dropped words and a cloned voice drifting off the reference timbre — are invisible
+without listening to the whole thing. New opt-in QC checks both against the
+rendered master.
+
+- **`core/qc.py`** — pure WER scoring (markup strip → word normalize → edit
+  distance) plus two lazy backends: transcription (prefers `mlx_whisper`, falls
+  back to `faster_whisper`) and speaker similarity (`resemblyzer` partial
+  embeddings vs the reference clip, windows below `qc_sim_threshold` flagged).
+  Missing deps degrade to a `None` metric + a note — never a crash.
+- **`QCReport`/`QCWindow`** added to `models.py`; `GenerateResult.qc` populated
+  only when enabled. New settings: `ENABLE_QC` (default off), `QC_WHISPER_MLX_REPO`,
+  `QC_WHISPER_FASTER_SIZE`, `QC_SIM_THRESHOLD`.
+- **Orchestrator hook** — `run()` calls `_attach_qc` after the master is written
+  (both content types). Speaker similarity runs only when exactly one cloned voice
+  (f5/cosyvoice) is in play — sleep stories always, podcasts when a single distinct
+  cloned voice is used. QC failures are caught and recorded in `qc.notes`, never
+  failing a good render.
+- New optional extra: `uv sync --extra qc` (`faster-whisper`, `resemblyzer`,
+  `mlx-whisper` on macOS). Base install and `uv run pytest` stay clean — QC tests
+  fake the ASR/encoder imports.
+
+Design note: QC scores the **final master as a whole** (windowed for SIM) rather
+than per turn — chunk WAVs are deleted after stitching, and whole-master windowing
+catches gradual drift without reconstructing turn boundaries. Cost: it ~doubles a
+job's wall-clock, hence opt-in.
+
+## 2026-06-19 — Phase 1: long-form benchmark + Apple-Silicon perf hardening
+
+The three local-TTS research reports all *assert* that 30–90 min local generation
+is practical on an M1 Max but none measured it, and Doc A specifically warns about
+the MLX buffer cache ballooning over long jobs and the first-inference Metal JIT
+penalty. This phase makes both measurable and tunable.
+
+- **`scripts/bench_longform.py`** — new benchmark (mirrors `bench_f5.py` /
+  `bench_cosyvoice.py`). For each local provider it builds increasingly long
+  narration (default 5/15/30 min; pass `--minutes 30 60`), chunks it exactly like
+  the orchestrator, synthesizes every chunk, and reports chunk count, audio length,
+  wall-clock, RTF, and peak RSS. ElevenLabs is excluded (cloud — measures nothing
+  local, would bill calls). Hardware-gated: per-provider/length failures are
+  reported and skipped.
+- **MLX cache cap** — `CosyVoiceProvider` gained `cache_mb` and `_cap_mlx_cache()`,
+  called once when the model loads. Best-effort across MLX releases (tries
+  `mx.set_cache_limit` and `mx.metal.set_cache_limit`). New `MLX_CACHE_MB` setting
+  (default `0` = MLX default / no cap).
+- **Provider warmup** — `CosyVoiceProvider.warmup()` runs a silent dummy synthesis
+  to pre-compile kernels off the first real generate. Wired into `bootstrap` behind
+  the new `WARMUP_PROVIDERS` flag (default off). Best-effort: a missing MLX install
+  or no reference voices just no-ops.
+
+Decision deferred (hardware-gated): use the captured RTF plus `bench_cosyvoice.py`'s
+A/B to decide whether to flip CosyVoice3 to the default sleep provider. Not
+auto-flipped — Kokoro stays default until a human confirms the win on Apple Silicon.
+
+## 2026-06-17 — Fix: CosyVoice3 produced no audio (version-mismatch in generate_audio)
+
+`generate` failed with `[cosyvoice] no audio produced for voice 'Riley'`. Root
+cause: the provider was written against `mlx-audio-plus`'s GitHub `main`, but the
+pinned **0.1.8** release has a different `generate_audio` contract. Read the
+installed source to find three mismatches and fixed all:
+
+- **No `output_path` param.** 0.1.8 writes to `{file_prefix}.{audio_format}`
+  relative to CWD, so the WAV landed in the working dir, not our temp dir → the
+  file-not-found fallback raised "no audio produced". Fix: pass `file_prefix` as a
+  full temp-dir path; drop `output_path`.
+- **Instruct key is `instruct_text`, not `instruct`.** Our `instruct=` was
+  swallowed into `**kwargs` and ignored, so Instruct Mode never activated.
+- **`ref_text` outranks `instruct_text`.** `CosyVoice3.generate` branches
+  zero-shot before instruct, so passing both ran zero-shot and dropped the
+  directive. Fix: instruct mode now passes `instruct_text` and **omits**
+  `ref_text`; zero-shot still passes `ref_text`. Also dropped the unsupported
+  `seed` param.
+
+Verified against the real model: Riley in instruct mode renders 16.5 s of audio
+in 13.8 s (RTF 0.84). Also fixed both `scripts/bench_*.py` to add the backend dir
+to `sys.path` so they run as documented (`uv run python scripts/bench_*.py`) — a
+pre-existing import bug, not CosyVoice-specific.
+
+## 2026-06-17 — CosyVoice3 (MLX) sleep-story provider with Instruct Mode
+
+Synthesized three local-Apple-Silicon research reports against the codebase: the
+app already had the chunking, disk stitching, EBU R128 mastering, ambient beds,
+and voice cloning the reports recommend. The one genuine *sleep-quality* gap was
+the TTS model — F5/Kokoro clone timbre but carry the reference clip's energy into
+the output, so calm delivery isn't guaranteed over 30–90 min. Added **CosyVoice3
+(MLX)** as a new opt-in provider whose flow-matching DiT **Instruct Mode**
+decouples the cloned *timbre* from the *delivery*.
+
+- **New `cosyvoice` provider** (`providers/cosyvoice_provider.py`). Apple-Silicon
+  only via `mlx-audio-plus` (imports as `mlx_audio`), added as a `mlx` optional
+  extra (`uv sync --extra mlx`) so non-Mac/CI installs and `uv run pytest` (fakes)
+  stay clean. Heavy import is lazy (synthesis only); `list_voices` just scans the
+  reference-voice assets, so the app boots and lists voices everywhere —
+  failures surface as `ProviderError` + a per-provider error in `/api/voices`.
+- **Instruct Mode wired into the sleep path.** New capability flag
+  `TTSProvider.accepts_instruct`; `_sleep_voice_settings` injects an `instruct`
+  directive (`cosyvoice_sleep_instruct`, overridable per story via
+  `SleepStoryRequest.style_prompt`) for instruct-capable providers. Pacing rides
+  the directive, **not** a numeric speed multiplier (`consumes_local_speed=False`)
+  — the model's strength, no time-stretch artifacts. The Speed slider is ignored
+  for CosyVoice3 (noted in the UI).
+- **Reuses cloned-voice assets.** CosyVoice3 reads the same
+  `reference_audio/*.wav` + `reference_text/*.txt` pairs as F5. Renamed
+  `f5_voice_registry` → `reference_voice_registry` (shared), with
+  `f5_voice_registry` kept as a thin re-export for back-compat. The transcript is
+  always passed to `generate_audio`, which both conditions zero-shot cloning and
+  skips mlx_audio's default ~1.5 GB Whisper auto-transcription of the reference.
+- **Model:** `mlx-community/Fun-CosyVoice3-0.5B-2512-4bit` (~1.1 GB, 24 kHz),
+  downloaded on first synthesis; loaded once and cached across chunks. New chunk
+  budget `cosyvoice_chunk_chars=300` keeps chunks under the ~30 s ref window.
+- **Opt-in, not default.** Kokoro stays the default sleep provider until
+  `scripts/bench_cosyvoice.py` confirms an A/B win vs F5. Frontend adds CosyVoice3
+  to the sleep provider dropdown + a "Delivery style" field bound to
+  `style_prompt`.
+- **Out of scope (sequenced follow-ups from the reports):** LLM script generation,
+  full MLX migration of F5/Kokoro, ASR/drift QC, Pedalboard reverb.
+
 ## 2026-06-17 — Model-specific TTS: ElevenLabs v2/v3 + content tailoring, F5 runtime fix
 
 The pipeline was provider-agnostic to a fault: one uniform `voice_settings` dict

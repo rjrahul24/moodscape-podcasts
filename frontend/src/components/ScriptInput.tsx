@@ -42,7 +42,10 @@ export function ScriptInput({ value, onChange, pacing, onPacingChange }: Props) 
         <span className="hint">
           Adds sentence pauses &amp; varied timing. Inline tags:{" "}
           <code>[pause:600]</code> silence,{" "}
-          <code>[excited]</code> <code>[calm]</code> <code>[sad]</code>{" "}
+          <code>[breath]</code> <code>[deep_breath]</code> <code>[sigh]</code>{" "}
+          breaths,{" "}
+          <code>[excited]</code> <code>[calm]</code> <code>[soothing]</code>{" "}
+          <code>[reflective]</code> <code>[warm]</code> <code>[sad]</code>{" "}
           <code>[whispering]</code> tone.
         </span>
       </div>

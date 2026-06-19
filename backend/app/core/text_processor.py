@@ -28,12 +28,27 @@ import re
 from dataclasses import dataclass
 
 from . import chunker
-from .emotion import EMOTIONS
+from .emotion import EMOTIONS, SFX_PAUSE_MS, sfx_pause_ms
 
 # Explicit author pause: [pause:600] or [pause:600ms] (whitespace tolerant).
 _PAUSE_RE = re.compile(r"\[pause:\s*(\d+)\s*(?:ms)?\]", re.IGNORECASE)
 # A single leading bracket tag at the start of a span, e.g. "[excited] ...".
 _LEADING_TAG_RE = re.compile(r"^\s*\[([A-Za-z][\w-]*)\]\s*")
+# Inline breath / SFX tags, e.g. [breath] / [deep_breath] / [sigh].
+_SFX_RE = re.compile(
+    r"\[(" + "|".join(re.escape(k) for k in SFX_PAUSE_MS) + r")\]", re.IGNORECASE
+)
+
+
+def _sfx_to_pauses(text: str) -> str:
+    """Rewrite breath/SFX tags into equivalent ``[pause:N]`` markers.
+
+    Used for providers that can't *perform* an inline breath: the tag becomes a
+    short silence at the same point, so the timing beat still lands and no model
+    ever speaks the literal tag. Providers that can perform tags
+    (``accepts_inline_sfx``) skip this and keep the tag in the text.
+    """
+    return _SFX_RE.sub(lambda m: f"[pause:{sfx_pause_ms(m.group(1))}]", text)
 
 
 @dataclass(frozen=True)
@@ -81,15 +96,24 @@ def plan_turn(
     rng: random.Random,
     gap_min_ms: int,
     gap_max_ms: int,
+    inline_sfx: bool = False,
 ) -> list[PlanItem]:
     """Break one turn's ``text`` into an ordered list of speech + pause items.
 
     ``gap_min_ms``/``gap_max_ms`` bound the randomized inter-sentence micro-pause
     (drawn from ``rng``). ``max_chars`` is the provider's byte budget; overlong
     sentences are split via :func:`chunker.chunk_text`.
+
+    ``inline_sfx`` reflects the provider's ``accepts_inline_sfx`` capability: when
+    True, breath/SFX tags are left in the text for the model to perform; when
+    False (the default for current providers) they become short ``[pause:N]``
+    silences so the timing beat still lands.
     """
     lo, hi = (gap_min_ms, gap_max_ms) if gap_min_ms <= gap_max_ms else (gap_max_ms, gap_min_ms)
     items: list[PlanItem] = []
+
+    if not inline_sfx:
+        text = _sfx_to_pauses(text)
 
     # Split on explicit [pause:N] tags: re.split keeps captured durations in the
     # odd positions (text, ms, text, ms, ...).

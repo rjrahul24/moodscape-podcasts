@@ -1,11 +1,20 @@
+import io
+import shutil
+
+import numpy as np
 import pytest
 from fastapi.testclient import TestClient
+from pydub import AudioSegment
 
 from app.config import Settings, get_settings
+from app.core.stitcher import numpy_to_segment
 from app.main import create_app
 from app.providers import registry
 
 from .conftest import FakeProvider
+
+ffmpeg_missing = shutil.which("ffmpeg") is None
+needs_ffmpeg = pytest.mark.skipif(ffmpeg_missing, reason="ffmpeg not on PATH")
 
 
 @pytest.fixture
@@ -17,6 +26,7 @@ def client(tmp_path):
         final_format="wav",
         also_export_mp3=False,
         inter_turn_gap_ms=100,
+        assets_dir=tmp_path / "assets",
     )
     app.dependency_overrides[get_settings] = lambda: settings
     registry.register(FakeProvider())
@@ -24,6 +34,15 @@ def client(tmp_path):
         yield test_client
     app.dependency_overrides.clear()
     registry.clear()
+
+
+def _wav_bytes(ms: int = 400, rate: int = 24000) -> bytes:
+    n = int(rate * ms / 1000)
+    t = np.arange(n) / rate
+    seg = numpy_to_segment(0.5 * np.sin(2 * np.pi * 220 * t).astype(np.float32), rate)
+    buf = io.BytesIO()
+    seg.export(buf, format="wav")
+    return buf.getvalue()
 
 
 def test_health_ok(client):
@@ -85,3 +104,40 @@ def test_generate_missing_voice_returns_422(client):
         },
     )
     assert response.status_code == 422
+
+
+@needs_ffmpeg
+def test_upload_reference_voice_with_transcript(client, tmp_path):
+    response = client.post(
+        "/api/voices/reference",
+        data={"name": "Calm River", "transcript": "the exact words spoken"},
+        files={"audio": ("clip.wav", _wav_bytes(), "audio/wav")},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["id"] == "calm_river"
+    assert "f5" in body["providers"] and "cosyvoice" in body["providers"]
+    assert body["transcript"] == "the exact words spoken"
+
+    # Persisted into the shared registry layout, so any cloning provider
+    # configured with this assets_dir lists it on its next scan. (The bootstrapped
+    # F5/CosyVoice instances scan their own assets_dir, which in the app matches.)
+    from app.providers import reference_voice_registry as rvr
+
+    assert "calm_river" in rvr.scan(tmp_path / "assets")
+
+
+@needs_ffmpeg
+def test_upload_reference_voice_without_transcript_or_whisper_422(client, monkeypatch):
+    # No transcript + no Whisper backend available -> clear 422.
+    import sys
+
+    monkeypatch.setitem(sys.modules, "mlx_whisper", None)
+    monkeypatch.setitem(sys.modules, "faster_whisper", None)
+    response = client.post(
+        "/api/voices/reference",
+        data={"name": "No Transcript"},
+        files={"audio": ("clip.wav", _wav_bytes(), "audio/wav")},
+    )
+    assert response.status_code == 422
+    assert "transcript" in response.json()["detail"].lower()

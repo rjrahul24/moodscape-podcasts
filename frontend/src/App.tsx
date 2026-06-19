@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { fetchVoices } from "./api/client";
 import { fetchAmbient, runJob } from "./api/jobs";
+import { AddVoice } from "./components/AddVoice";
 import { ContentTypeSelector } from "./components/ContentTypeSelector";
 import { Icon } from "./components/Icon";
 import { ProgressBar } from "./components/ProgressBar";
@@ -36,7 +37,9 @@ export default function App() {
   const [sleepModel, setSleepModel] = useState(ELEVENLABS_MODELS[0].id);
   const [sleepSpeed, setSleepSpeed] = useState(0.85);
   const [sleepPauseMs, setSleepPauseMs] = useState(900);
+  const [sleepRamp, setSleepRamp] = useState(true);
   const [sleepAmbient, setSleepAmbient] = useState("");
+  const [sleepStyle, setSleepStyle] = useState("");
   const [proseText, setProseText] = useState("");
 
   // Shared job state
@@ -45,14 +48,21 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<GenerateResult | null>(null);
 
-  useEffect(() => {
+  const loadVoices = useCallback(() => {
     fetchVoices()
-      .then(setProviderVoices)
+      .then((groups) => {
+        setProviderVoices(groups);
+        setVoicesError(null);
+      })
       .catch((err: Error) => setVoicesError(err.message));
+  }, []);
+
+  useEffect(() => {
+    loadVoices();
     fetchAmbient()
       .then(setAmbientBeds)
       .catch(() => setAmbientBeds([]));
-  }, []);
+  }, [loadVoices]);
 
   const defaultProvider = providerVoices[0]?.provider ?? "elevenlabs";
 
@@ -136,7 +146,12 @@ export default function App() {
             model_id: sleepProvider === "elevenlabs" ? sleepModel : null,
             speed: sleepSpeed,
             pause_ms: sleepPauseMs,
+            ramp: sleepRamp,
             ambient_bed: sleepAmbient || null,
+            style_prompt:
+              sleepProvider === "cosyvoice" && sleepStyle.trim()
+                ? sleepStyle.trim()
+                : null,
           },
           setProgress,
         );
@@ -184,6 +199,8 @@ export default function App() {
         </div>
       )}
 
+      <AddVoice onAdded={loadVoices} />
+
       {isSleep ? (
         <SleepStoryConfig
           providerVoices={providerVoices}
@@ -193,14 +210,18 @@ export default function App() {
           modelId={sleepModel}
           speed={sleepSpeed}
           pauseMs={sleepPauseMs}
+          ramp={sleepRamp}
           ambientBed={sleepAmbient}
+          stylePrompt={sleepStyle}
           proseText={proseText}
           onProviderChange={handleSleepProviderChange}
           onVoiceChange={setSleepVoiceId}
           onModelChange={setSleepModel}
           onSpeedChange={setSleepSpeed}
           onPauseChange={setSleepPauseMs}
+          onRampChange={setSleepRamp}
           onAmbientChange={setSleepAmbient}
+          onStyleChange={setSleepStyle}
           onProseChange={setProseText}
         />
       ) : (

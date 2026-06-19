@@ -403,6 +403,24 @@ textarea:focus-visible {
   grid-column: 1 / -1;
 }
 
+/* Checkbox row: box sits beside its label instead of stacking like a select. */
+.checkbox-field {
+  flex-direction: row;
+  align-items: flex-start;
+  gap: var(--s-3);
+}
+
+.checkbox-field input[type="checkbox"] {
+  margin-top: 0.2rem;
+  flex: 0 0 auto;
+}
+
+.checkbox-field .field-label {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--s-1);
+}
+
 .field-label {
   color: var(--muted);
   font-size: 0.85rem;
@@ -523,6 +541,27 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
   background: var(--danger-bg);
   border: 1px solid var(--danger-border);
   color: var(--danger);
+}
+
+.banner.success {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+
+/* Quiet inline text button (e.g. the "Add a voice" panel toggle). */
+.link-button {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: var(--primary);
+  cursor: pointer;
+}
+
+.link-button:hover {
+  color: var(--accent);
+  text-decoration: underline;
 }
 
 .banner .banner-body {

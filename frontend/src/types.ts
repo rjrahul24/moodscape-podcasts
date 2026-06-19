@@ -20,11 +20,12 @@ export interface SpeakerVoice {
   model_id?: string | null;
 }
 
-// ElevenLabs models the UI lets you pick. v3 is more expressive (inline audio
-// tags + discrete stability); v2 has the best text normalization.
+// ElevenLabs models the UI lets you pick. v3 (the default — first entry) is more
+// expressive: it performs inline audio tags ([warmly], [exhales softly]) and uses
+// discrete stability. v2 is the stable fallback with the best text normalization.
 export const ELEVENLABS_MODELS: { id: string; label: string }[] = [
-  { id: "eleven_multilingual_v2", label: "Multilingual v2" },
   { id: "eleven_v3", label: "v3 (expressive)" },
+  { id: "eleven_multilingual_v2", label: "Multilingual v2" },
 ];
 
 export interface GenerateRequest {
@@ -67,6 +68,7 @@ export interface PodcastJobRequest {
   output_format?: string | null;
   gap_ms?: number | null;
   pacing?: boolean; // conversational pacing + tone tags (default true)
+  seed?: number | null; // deterministic ElevenLabs re-renders (optional)
 }
 
 export interface SleepStoryJobRequest {
@@ -78,6 +80,11 @@ export interface SleepStoryJobRequest {
   speed?: number | null;
   pause_ms?: number | null;
   ambient_bed?: string | null;
+  // Progressive ramp-down: speed eases and pauses lengthen toward sleep onset.
+  ramp?: boolean; // default true
+  // Delivery directive for instruct-capable providers (CosyVoice3); else ignored.
+  style_prompt?: string | null;
+  seed?: number | null; // deterministic ElevenLabs re-renders (optional)
 }
 
 export type JobRequest = PodcastJobRequest | SleepStoryJobRequest;
@@ -107,4 +114,14 @@ export interface JobView {
 export interface AmbientBed {
   id: string;
   name: string;
+}
+
+// Result of uploading a reference clip for cloning (POST /api/voices/reference).
+export interface ReferenceVoiceCreated {
+  id: string;
+  name: string;
+  providers: string[]; // cloning providers that can now use it (f5, cosyvoice)
+  transcript: string;
+  replaced: boolean;
+  notes: string[]; // hygiene steps applied / skipped
 }

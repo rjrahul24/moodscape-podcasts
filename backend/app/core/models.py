@@ -83,6 +83,9 @@ class PodcastRequest(BaseModel):
     # speed jitter, and inline tone/pause tags. On by default; set False for the
     # legacy flat render (one block per turn, fixed gaps, no emotion).
     pacing: bool = True
+    # Optional deterministic seed forwarded to ElevenLabs so a re-render matches
+    # the previous cadence/emotion trajectory. None lets the model sample freely.
+    seed: int | None = None
 
 
 class SleepStoryRequest(BaseModel):
@@ -102,6 +105,17 @@ class SleepStoryRequest(BaseModel):
     speed: float | None = None  # overrides Settings.sleep_default_speed
     pause_ms: int | None = None  # inter-sentence silence; overrides default
     ambient_bed: str | None = None  # slug from /api/ambient (optional)
+    # Progressive ramp-down: speed gently decelerates and inter-sentence pauses
+    # lengthen across the story (toward sleep onset). On by default; False holds a
+    # single fixed speed/pause for the whole narration.
+    ramp: bool = True
+    # Delivery directive for instruct-capable providers (CosyVoice3 Instruct
+    # Mode), e.g. "Speak very slowly and softly". Overrides the configured sleep
+    # default; ignored by providers that don't accept instructions.
+    style_prompt: str | None = None
+    # Optional deterministic seed forwarded to ElevenLabs for reproducible
+    # re-renders. None lets the model sample freely.
+    seed: int | None = None
 
 
 JobRequest = Annotated[
@@ -129,6 +143,30 @@ class GeneratedFile(BaseModel):
     size_bytes: int
 
 
+class QCWindow(BaseModel):
+    """One windowed slice of the master flagged for low speaker similarity."""
+
+    start_s: float  # window start time in the rendered master
+    similarity: float  # cosine similarity to the reference clip (0..1)
+
+
+class QCReport(BaseModel):
+    """Optional long-form quality report (opt-in via ``Settings.enable_qc``).
+
+    ``wer`` is the word error rate of a local-Whisper transcript vs the source
+    text (markup stripped). The ``sim_*`` fields summarize speaker drift for a
+    single cloned voice; ``notes`` records any check that was skipped (e.g. a QC
+    dependency not installed), so a missing extra is visible rather than silent.
+    """
+
+    wer: float | None = None
+    transcript: str | None = None
+    sim_mean: float | None = None
+    sim_min: float | None = None
+    sim_flagged: list[QCWindow] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
 class GenerateResult(BaseModel):
     """Response for ``POST /api/generate`` and the ``result`` of a finished job."""
 
@@ -136,6 +174,7 @@ class GenerateResult(BaseModel):
     duration_ms: int
     segments: list[SegmentInfo]
     files: list[GeneratedFile] = Field(default_factory=list)
+    qc: QCReport | None = None  # populated only when QC is enabled
 
 
 class JobCreated(BaseModel):
@@ -169,3 +208,14 @@ class AmbientBed(BaseModel):
 
     id: str
     name: str
+
+
+class ReferenceVoiceCreated(BaseModel):
+    """Result of uploading a reference clip for cloning (``POST /api/voices/reference``)."""
+
+    id: str  # slug, the registry key + voice_id
+    name: str  # display name
+    providers: list[str]  # cloning providers that can now use it (f5, cosyvoice)
+    transcript: str  # the transcript stored alongside the clip
+    replaced: bool = False  # True if an existing voice with this slug was overwritten
+    notes: list[str] = Field(default_factory=list)  # hygiene steps applied / skipped

@@ -9,6 +9,8 @@ we depend on is explicit:
 
 from __future__ import annotations
 
+import re
+
 import httpx
 from pydub import AudioSegment
 
@@ -19,6 +21,10 @@ from app.core.stitcher import bytes_to_segment
 from .base import TTSProvider
 
 _TIMEOUT = httpx.Timeout(120.0, connect=10.0)
+
+# Any ``[bracketed]`` token. v3 *performs* these (kept in the text); v2 cannot, so
+# they are stripped before synthesis so the model never speaks the literal tag.
+_BRACKET_TAG_RE = re.compile(r"\[[^\]]*\]")
 
 # ElevenLabs has two generations with *different* control surfaces, so the
 # provider tailors itself to whichever the caller selected (per speaker / per
@@ -39,15 +45,20 @@ EMOTION_PROFILES: dict[str, dict[str, float]] = {
     "sad": {"stability": 0.70, "similarity_boost": 0.80, "style": 0.40},
     "whispering": {"stability": 0.90, "similarity_boost": 0.60, "style": 0.05},
     "neutral": {"stability": 0.55, "similarity_boost": 0.80, "style": 0.25},
+    # Mindfulness-leaning tones: steady, low-style, gently warm.
+    "soothing": {"stability": 0.88, "similarity_boost": 0.75, "style": 0.10},
+    "reflective": {"stability": 0.80, "similarity_boost": 0.78, "style": 0.20},
+    "warm": {"stability": 0.75, "similarity_boost": 0.82, "style": 0.30},
 }
 
 # v2 — per-content-type base profile used when no tone tag is present. Podcasts
-# lean expressive (lower stability, some style); sleep leans calm and steady
-# (high stability, no style) so the *voice itself* narrates gently — the sleep
-# mastering chain then sits on top.
+# lean expressive but keep ``style`` at 0.0 (research: unforced, organic dialogue
+# — style exaggeration introduces dramatic flair that reads as artificial). Sleep
+# sits at the research sweet spot (stability ~0.70, no style) — warm and steady
+# without a robotic drone; the sleep mastering chain then sits on top.
 V2_CONTENT_BASE: dict[str, dict[str, float]] = {
-    "podcast": {"stability": 0.45, "similarity_boost": 0.80, "style": 0.45},
-    "sleep": {"stability": 0.88, "similarity_boost": 0.80, "style": 0.0},
+    "podcast": {"stability": 0.50, "similarity_boost": 0.80, "style": 0.0},
+    "sleep": {"stability": 0.70, "similarity_boost": 0.80, "style": 0.0},
 }
 
 # v3 — tone tag -> inline performed audio tag prepended to the chunk text.
@@ -57,6 +68,9 @@ V3_AUDIO_TAGS: dict[str, str] = {
     "calm": "[calm]",
     "sad": "[sad]",
     "neutral": "",
+    "soothing": "[calm]",
+    "reflective": "[thoughtful]",
+    "warm": "[warmly]",
 }
 
 # v3 — discrete stability per content type (Natural for podcasts, Robust for the
@@ -70,9 +84,20 @@ def _clamp_speed(speed: float) -> float:
     return max(_SPEED_MIN, min(_SPEED_MAX, float(speed)))
 
 
+def _strip_bracket_tags(text: str) -> str:
+    """Remove ``[...]`` tags and collapse the whitespace they leave behind.
+
+    Used on the v2 path, which has no inline-tag vocabulary — left in, a tag like
+    ``[exhales softly]`` is read aloud or garbles prosody.
+    """
+    return re.sub(r"\s{2,}", " ", _BRACKET_TAG_RE.sub("", text)).strip()
+
+
 class ElevenLabsProvider(TTSProvider):
     name = "elevenlabs"
     has_native_speed = True
+    accepts_inline_sfx = True  # v3 performs [warmly], [exhales softly], [deep_breath], …
+    accepts_continuity = True  # accepts previous_text / next_text for cross-chunk prosody
 
     def __init__(
         self,
@@ -82,6 +107,8 @@ class ElevenLabsProvider(TTSProvider):
         model_id: str = "eleven_multilingual_v2",
         podcast_model: str | None = None,
         sleep_model: str | None = None,
+        use_speaker_boost: bool = True,
+        text_normalization: str = "auto",
     ):
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
@@ -89,6 +116,8 @@ class ElevenLabsProvider(TTSProvider):
         # Per-content-type default model used when the request doesn't pin one.
         self._podcast_model = podcast_model or model_id
         self._sleep_model = sleep_model or model_id
+        self._use_speaker_boost = use_speaker_boost
+        self._text_normalization = text_normalization
 
     # ── helpers ───────────────────────────────────────────────────────────────
     def _headers(self) -> dict[str, str]:
@@ -118,14 +147,18 @@ class ElevenLabsProvider(TTSProvider):
 
     def _prepare(
         self, text: str, voice_settings: dict | None
-    ) -> tuple[str, str, dict | None]:
-        """Resolve (text, model_id, voice_settings body) for one synthesis call.
+    ) -> tuple[str, str, dict | None, dict]:
+        """Resolve (text, model_id, voice_settings body, top-level extras).
 
         Reads the orchestrator's per-chunk hints — ``content_type``, ``model_id``,
         ``emotion``, ``speed`` — and tailors them to the selected ElevenLabs
         generation. For v3 the tone tag is performed *inline* (prepended to the
-        text); for v2 it maps to a numeric profile. Any explicit EL keys the
-        caller passed (``stability`` etc.) win over the computed profile.
+        text) and any other ``[...]`` tags are kept for the model to perform; for
+        v2 the tone tag maps to a numeric profile and *all* bracket tags are
+        stripped from the text. Cross-chunk continuity (``previous_text`` /
+        ``next_text``) and ``seed`` are returned as top-level request-body extras.
+        Any explicit EL keys the caller passed (``stability`` etc.) win over the
+        computed profile.
         """
         vs = dict(voice_settings or {})
         content_type = vs.pop("content_type", "podcast")
@@ -134,26 +167,39 @@ class ElevenLabsProvider(TTSProvider):
         )
         emotion = vs.pop("emotion", None)
         speed = vs.pop("speed", None)
+        # Continuity / determinism ride alongside voice_settings but are top-level
+        # request fields, not voice-settings keys — pull them out here.
+        extras: dict = {}
+        prev_text = vs.pop("previous_text", None)
+        next_text = vs.pop("next_text", None)
+        seed = vs.pop("seed", None)
+        if prev_text:
+            extras["previous_text"] = prev_text
+        if next_text:
+            extras["next_text"] = next_text
+        if seed is not None:
+            extras["seed"] = seed
         # Whatever remains is an explicit EL override (stability/style/…).
 
         if model_id == V3_MODEL:
             text, body = self._prepare_v3(text, content_type, emotion, speed)
         else:
-            body = self._prepare_v2(content_type, emotion, speed)
+            text, body = self._prepare_v2(text, content_type, emotion, speed)
+        body["use_speaker_boost"] = self._use_speaker_boost
         body.update(vs)
-        return text, model_id, (body or None)
+        return text, model_id, (body or None), extras
 
     @staticmethod
     def _prepare_v2(
-        content_type: str, emotion: str | None, speed: float | None
-    ) -> dict:
+        text: str, content_type: str, emotion: str | None, speed: float | None
+    ) -> tuple[str, dict]:
         if emotion and emotion in EMOTION_PROFILES:
             profile = dict(EMOTION_PROFILES[emotion])
         else:
             profile = dict(V2_CONTENT_BASE.get(content_type, V2_CONTENT_BASE["podcast"]))
         if speed is not None:
             profile["speed"] = _clamp_speed(speed)
-        return profile
+        return _strip_bracket_tags(text), profile
 
     @staticmethod
     def _prepare_v3(
@@ -167,7 +213,9 @@ class ElevenLabsProvider(TTSProvider):
             stability = 0.0  # Creative for high energy
         body: dict = {"stability": stability, "similarity_boost": 0.85}
         if content_type == "podcast":
-            body["style"] = 0.5
+            # Unforced, organic dialogue — research recommends style 0.0 over the
+            # model's tendency to over-dramatize.
+            body["style"] = 0.0
         if speed is not None:
             body["speed"] = _clamp_speed(speed)
         return text, body
@@ -203,10 +251,14 @@ class ElevenLabsProvider(TTSProvider):
         voice_settings: dict | None = None,
     ) -> bytes:
         """Request encoded audio bytes from the ElevenLabs API."""
-        text, model_id, resolved = self._prepare(text, voice_settings)
+        text, model_id, resolved, extras = self._prepare(text, voice_settings)
         body: dict = {"text": text, "model_id": model_id}
         if resolved:
             body["voice_settings"] = resolved
+        if self._text_normalization:
+            body["apply_text_normalization"] = self._text_normalization
+        # previous_text / next_text (cross-chunk prosody) and seed (determinism).
+        body.update(extras)
 
         try:
             with httpx.Client(timeout=_TIMEOUT) as client:

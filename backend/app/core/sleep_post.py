@@ -26,6 +26,7 @@ def build_filtergraph(
     fade_out_s: float,
     lowpass_hz: int,
     target_lufs: float,
+    true_peak_db: float,
     sample_rate: int,
     channels: int,
 ) -> str:
@@ -39,7 +40,7 @@ def build_filtergraph(
         # Gentle, slow compressor — tames peaks without pumping.
         "acompressor=threshold=-18dB:ratio=2:attack=20:release=250",
         f"lowpass=f={int(lowpass_hz)}",
-        f"loudnorm=I={target_lufs}:TP=-1.5:LRA=11",
+        f"loudnorm=I={target_lufs}:TP={true_peak_db}:LRA=11",
         f"afade=t=in:st=0:d={fade_in_s}",
         f"afade=t=out:st={fade_out_start:.3f}:d={fade_out_s}",
         f"aformat=sample_rates={int(sample_rate)}:channel_layouts={'stereo' if channels == 2 else 'mono'}",
@@ -55,6 +56,7 @@ def process(in_wav: Path, out_wav: Path, *, settings: Settings, total_ms: int) -
         fade_out_s=settings.sleep_fade_out_s,
         lowpass_hz=settings.sleep_lowpass_hz,
         target_lufs=settings.sleep_target_lufs,
+        true_peak_db=settings.sleep_true_peak_db,
         sample_rate=settings.sleep_sample_rate,
         channels=settings.sleep_channels,
     )

@@ -15,9 +15,20 @@ from __future__ import annotations
 
 # Recognized inline tone tags (lowercased). A leading ``[tag]`` whose name is in
 # this set is consumed as the chunk's emotion; any other bracket tag is left in
-# the text untouched (matching the parser's existing pass-through behaviour).
+# the text untouched (matching the parser's existing pass-through behaviour). The
+# mindfulness-leaning words (soothing/reflective/warm) extend the original set for
+# wellness content — every provider still maps the same labels in its own terms.
 EMOTIONS: frozenset[str] = frozenset(
-    {"excited", "calm", "sad", "whispering", "neutral"}
+    {
+        "excited",
+        "calm",
+        "sad",
+        "whispering",
+        "neutral",
+        "soothing",
+        "reflective",
+        "warm",
+    }
 )
 
 # Per-emotion speaking-rate multiplier for speed-aware local providers
@@ -29,6 +40,21 @@ EMOTION_SPEED: dict[str, float] = {
     "sad": 0.92,
     "whispering": 0.95,
     "neutral": 1.0,
+    "soothing": 0.93,
+    "reflective": 0.95,
+    "warm": 0.97,
+}
+
+# Inline breath / SFX tags and the short silence each stands in for. These shape
+# *timing* at conversational scale (a beat to breathe) — the same tens–to-low-
+# hundreds-of-ms register as an author's explicit ``[pause:N]``, NOT the long
+# meditative padding reserved for sleep stories. Providers that can *perform* such
+# tags inline (``accepts_inline_sfx``) receive the tag in the text instead; the
+# rest get this silence so the beat still lands.
+SFX_PAUSE_MS: dict[str, int] = {
+    "breath": 250,
+    "deep_breath": 600,
+    "sigh": 400,
 }
 
 
@@ -37,3 +63,10 @@ def speed_multiplier(emotion: str | None) -> float:
     if not emotion:
         return 1.0
     return EMOTION_SPEED.get(emotion, 1.0)
+
+
+def sfx_pause_ms(tag: str | None) -> int | None:
+    """Return the stand-in silence (ms) for a breath/SFX ``tag``, or None."""
+    if not tag:
+        return None
+    return SFX_PAUSE_MS.get(tag.lower())

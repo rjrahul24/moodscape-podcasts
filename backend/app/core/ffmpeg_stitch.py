@@ -40,14 +40,25 @@ def segment_to_wav_file(
     *,
     sample_rate: int,
     channels: int = 1,
+    edge_fade_ms: int = 0,
 ) -> Path:
     """Normalize ``segment`` to ``sample_rate``/``channels`` and write a WAV.
 
     Normalizing every chunk to the same rate + channel count before concat is
     what lets a single master freely mix providers with different native rates
     (ElevenLabs up to 44.1 kHz, local models 24 kHz).
+
+    ``edge_fade_ms`` applies a short fade to each end of the chunk before export.
+    The ffmpeg concat demuxer joins chunks with a hard cut; a hard cut across a
+    non-zero sample produces an audible click. A few-ms edge fade lands both ends
+    on silence so boundaries are clean — the memory-safe stand-in for an
+    overlapping crossfade. 0 disables it (legacy behaviour).
     """
     seg = segment.set_frame_rate(int(sample_rate)).set_channels(int(channels))
+    if edge_fade_ms > 0:
+        fade = min(int(edge_fade_ms), len(seg) // 2)
+        if fade > 0:
+            seg = seg.fade_in(fade).fade_out(fade)
     seg.export(path, format="wav")
     return path
 

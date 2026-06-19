@@ -35,23 +35,26 @@ here. Lean into that: vary energy, let people react to each other, use the tone
 tags meaningfully. ElevenLabs handles long, complex sentences and normal
 punctuation well, so you can write naturally.
 
-### Which ElevenLabs model? (v2 vs v3)
+### Which ElevenLabs model? (v3 vs v2)
 
 In the app you pick a model per ElevenLabs speaker. The script format is the
 same; only how expressive the read gets differs:
 
-- **Multilingual v2** (default) — the tone tags below map to real voice-setting
-  changes (stability/style). Best text normalization (reads money, dates, units
-  cleanly). Write the 5 tone tags as documented; nothing else in brackets.
-- **v3 (expressive)** — performs **inline audio tags** the model acts out. In
-  addition to the 5 tone tags, on a v3 speaker you may sprinkle a *few* performed
-  cues **mid-line**, e.g. `[laughs]`, `[sighs]`, `[whispers]`, `[exhales]`. Use
-  them sparingly (a real laugh, a genuine sigh) — overusing them sounds theatrical.
-  v3 normalizes numbers less reliably, so **spell out** awkward numbers/years
-  (e.g. "twenty twenty-six", "thirty percent").
+- **v3 (expressive — the default)** — performs **inline audio tags** the model
+  acts out. In addition to the tone tags below, on a v3 speaker you may sprinkle a
+  *few* performed cues **mid-line**, e.g. `[laughs]`, `[soft laugh]`, `[sighs]`,
+  `[whispers]`, `[exhales softly]`, `[warmly]`. Use them sparingly (a real laugh, a
+  genuine sigh) — overusing them sounds theatrical. v3 normalizes numbers less
+  reliably, so **spell out** awkward numbers/years (e.g. "twenty twenty-six",
+  "thirty percent").
+- **Multilingual v2** (stable fallback) — the tone tags map to real voice-setting
+  changes (stability/style) and it has the best text normalization (money, dates,
+  units). It cannot perform inline cues: any bracket tag it doesn't recognize is
+  **silently stripped** before the read (it is *not* spoken), so a v2 speaker
+  simply ignores `[soft laugh]`. Stick to the tone tags on v2.
 
-If a speaker is on v2, stick to the 5 tone tags only — a literal `[laughs]` would
-be read aloud. When in doubt, write for v2; it always renders cleanly on v3 too.
+When in doubt, write the tone tags only — they render cleanly on both. Reach for
+performed cues to make a v3 speaker feel alive.
 
 ## OUTPUT FORMAT (must follow exactly)
 
@@ -67,21 +70,27 @@ be read aloud. When in doubt, write for v2; it always renders cleanly on v3 too.
 
 ## TAGS YOU MAY USE
 
-These are the **only** tags the app understands. Using anything else (e.g.
-`[laughs]`, `[sighs]`, `[music]`) will be read aloud literally — so **don't**.
-
 **Tone tags** — place at the **very start of a turn**, or immediately after a
 `[pause:N]`. The tone colors the rest of that turn. On ElevenLabs these change the
-actual voice settings (stability/style), so they're genuinely expressive:
+actual voice settings (v2) or pick a performed delivery (v3), so they're genuinely
+expressive:
 
 - `[excited]` — higher energy, animated (revelations, enthusiasm, good news)
 - `[calm]` — steady, grounded (reassurance, settling a point)
 - `[sad]` — softer, slower, heavier (somber or tender moments)
 - `[whispering]` — hushed, intimate (a secret, a gentle aside)
+- `[warm]` — gentle affection, encouraging
+- `[soothing]` — slow and softening (winding down a thread)
+- `[reflective]` — thoughtful, considered (mulling something over)
 - `[neutral]` — plain, even (default; you rarely need to write it)
 
 Guidance: tag a **minority** of turns — maybe 1 in 4 — where the emotion is real.
 Untagged turns sound natural already. Don't tag every line; it flattens the effect.
+
+**Performed cues (v3 only)** — mid-line bracket cues a v3 speaker acts out:
+`[laughs]`, `[soft laugh]`, `[sighs]`, `[exhales softly]`, `[whispers]`,
+`[deep breath]`. A v2 speaker drops these silently (never spoken), so they're safe
+to leave in but only *do* anything on v3. Keep them rare and genuine.
 
 **Pause tag** — `[pause:600]` (milliseconds; `[pause:600ms]` also works). Drop it
 **inside** a turn for a beat: before a punchline, after a big statement, or where a
@@ -139,8 +148,8 @@ for a beat; everything else carried by natural wording.
 ## BEFORE YOU OUTPUT — self-check
 
 - [ ] Every turn starts with `[Speaker 1]:` … `[Speaker N]:`, labels exact.
-- [ ] Only `[pause:N]`, `[excited]`, `[calm]`, `[sad]`, `[whispering]`, `[neutral]`
-      tags appear — nothing else in brackets.
+- [ ] Tone tags are from the documented set; performed cues (`[laughs]`, `[sighs]`,
+      …) appear only on v3 speakers and only rarely.
 - [ ] Tone tags sit at the start of a turn (or just after a `[pause:N]`), never
       mid-sentence, and only on a minority of turns.
 - [ ] No markdown, no parenthetical stage directions, no emojis.

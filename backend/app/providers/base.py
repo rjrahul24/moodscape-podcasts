@@ -38,6 +38,26 @@ class TTSProvider(ABC):
     #: model-native control, not a resampling/rate multiplier we apply ourselves.
     has_native_speed: bool = False
 
+    #: Provider accepts a natural-language ``instruct`` directive in
+    #: voice_settings that drives delivery/prosody independently of the voice
+    #: (CosyVoice3 Instruct Mode). The sleep path uses it to enforce a calm,
+    #: hypnotic pace decoupled from the cloned reference clip's energy.
+    accepts_instruct: bool = False
+
+    #: Provider can *perform* inline breath/SFX tags (e.g. ``[deep_breath]``)
+    #: rather than speaking them literally. When True the text processor leaves
+    #: those tags in the chunk text; when False (every current provider) they are
+    #: rewritten to short ``[pause:N]`` silences so the beat still lands. This is
+    #: the extension point for a future model whose inline-tag vocabulary is
+    #: verified against its real output.
+    accepts_inline_sfx: bool = False
+
+    #: Provider accepts cross-chunk context (``previous_text`` / ``next_text`` in
+    #: voice_settings) so prosody flows across chunk boundaries in long-form
+    #: renders (ElevenLabs). The orchestrator only builds and injects context for
+    #: providers that advertise this.
+    accepts_continuity: bool = False
+
     @abstractmethod
     def list_voices(self) -> list[Voice]:
         """Return the voices available from this provider.

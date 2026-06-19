@@ -22,7 +22,7 @@ from app.core.errors import ProviderError
 from app.core.models import Voice
 from app.core.stitcher import numpy_to_segment
 
-from . import f5_voice_registry
+from . import reference_voice_registry
 from .base import TTSProvider
 
 logger = logging.getLogger("moodscape")
@@ -58,7 +58,7 @@ class F5Provider(TTSProvider):
 
     # ── interface ─────────────────────────────────────────────────────────────
     def list_voices(self) -> list[Voice]:
-        registry = f5_voice_registry.scan(self._assets_dir)
+        registry = reference_voice_registry.scan(self._assets_dir)
         return [
             Voice(id=slug, name=slug.replace("_", " ").title(), provider=self.name)
             for slug in sorted(registry)
@@ -164,7 +164,7 @@ class F5Provider(TTSProvider):
         if slug in self._ref_cache:
             return self._ref_cache[slug]
 
-        registry = f5_voice_registry.scan(self._assets_dir)
+        registry = reference_voice_registry.scan(self._assets_dir)
         if slug not in registry:
             raise ProviderError(
                 self.name,

@@ -32,6 +32,30 @@ dev = [
     "pytest>=8",
     "respx>=0.21",
 ]
+# CosyVoice3 (MLX) sleep-story provider — Apple Silicon only, imported lazily at
+# synthesis. `mlx-audio-plus` exposes the FunAudioLLM CosyVoice3 runtime and
+# imports as `mlx_audio`. Kept out of the base deps so non-Mac/CI installs (and
+# `uv run pytest`, which uses fakes) stay clean: opt in with `uv sync --extra mlx`.
+mlx = [
+    "mlx-audio-plus>=0.1.8",
+]
+# Long-form quality control (opt-in via Settings.enable_qc) — local Whisper for
+# transcript WER + a speaker encoder for cloned-voice drift. Heavy and imported
+# lazily inside core/qc.py, so kept out of the base deps: opt in with
+# `uv sync --extra qc`. mlx-whisper is Apple-Silicon-only; faster-whisper is the
+# CPU fallback, so QC works (more slowly) on any host that installs the extra.
+qc = [
+    "faster-whisper>=1.0",
+    "resemblyzer>=0.1.4",
+    "mlx-whisper>=0.4; sys_platform == 'darwin'",
+]
+# Reference-clip denoising for the voice-upload hygiene step. The baseline hygiene
+# (mono/resample/silence-trim/length-cap) uses only pydub, so upload works without
+# this; `clean` adds spectral-gate denoising via noisereduce. Imported lazily in
+# core/ref_clean.py — opt in with `uv sync --extra clean`.
+clean = [
+    "noisereduce>=3.0",
+]
 
 # Not an installable package — uv just manages the virtualenv + dependencies.
 [tool.uv]

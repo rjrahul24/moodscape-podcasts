@@ -38,16 +38,29 @@ class Settings(BaseSettings):
 
     # ElevenLabs. ``elevenlabs_model_id`` is the global fallback; the per-content
     # defaults below are used when a request doesn't pin a model. The UI can
-    # override per speaker / per sleep story (v2 vs v3). v3 needs account access
-    # and caps requests at 5k chars (under elevenlabs_chunk_chars, so fine).
+    # override per speaker / per sleep story (v2 vs v3). v3 is the default — it
+    # performs inline audio tags ([warmly], [exhales softly], …) for expressive
+    # podcasts and calm sleep narration; v2 remains selectable as a stable
+    # fallback. v3 caps requests at 5k chars (under elevenlabs_chunk_chars, fine).
     elevenlabs_api_key: str | None = None
     elevenlabs_base_url: str = "https://api.elevenlabs.io"
     elevenlabs_model_id: str = "eleven_multilingual_v2"
-    elevenlabs_podcast_model: str = "eleven_multilingual_v2"
-    elevenlabs_sleep_model: str = "eleven_multilingual_v2"
+    elevenlabs_podcast_model: str = "eleven_v3"
+    elevenlabs_sleep_model: str = "eleven_v3"
+    # Pull the voice "closer" (intimate proximity) — research sweet spot for both
+    # expressive dialogue and bedtime narration. Sent on every EL request.
+    elevenlabs_use_speaker_boost: bool = True
+    # Server-side text normalization ("auto"|"on"|"off"): spells numbers/symbols
+    # so the model never reads digits in a clipped, transactional tone.
+    elevenlabs_text_normalization: str = "auto"
 
     # Providers
     default_provider: str = "elevenlabs"
+    # Pre-compile Metal/model kernels at startup with a silent dummy synthesis so
+    # the first real generate doesn't pay the ~5x JIT penalty. Off by default
+    # (adds boot latency + needs the heavy ML libs installed); turn on for a
+    # long-running local instance. Best-effort — failures are logged, not fatal.
+    warmup_providers: bool = False
 
     # Audio
     segment_output_format: str = "mp3_44100_128"
@@ -68,9 +81,17 @@ class Settings(BaseSettings):
     # All segments are normalized to this rate before stitching, so providers
     # with different native rates (ElevenLabs 44.1kHz, local models 24kHz) mix.
     target_sample_rate: int = 44100
+    # Short equal-power fade applied to each chunk WAV's edges before the concat
+    # demuxer joins them — removes zero-crossing click artifacts at boundaries
+    # without overlapping audio (the memory-safe stand-in for a crossfade). 0 = off.
+    chunk_edge_fade_ms: int = 8
 
-    # Local models — reference voice assets (F5)
+    # Local models — reference voice assets (F5, CosyVoice3)
     assets_dir: Path = _DEFAULT_ASSETS_DIR
+    # Uploaded reference clips are cleaned (mono, resample, silence-trim, optional
+    # denoise) before they enter the registry. Cloners need only a short window.
+    reference_clip_sample_rate: int = 24000
+    reference_clip_max_seconds: float = 30.0
 
     # Kokoro
     kokoro_speed: float = 1.0
@@ -88,11 +109,26 @@ class Settings(BaseSettings):
     f5_cfg_strength: float = 2.0
     f5_sway_coef: float = -1.0
 
+    # CosyVoice3 (MLX) — Apple-Silicon sleep-story provider. Instruct Mode
+    # decouples the cloned timbre from delivery: ``cosyvoice_sleep_instruct``
+    # drives a calm, hypnotic pace independent of the reference clip's energy
+    # (injected by the orchestrator for sleep stories; per-story overridable via
+    # SleepStoryRequest.style_prompt). Apple Silicon only; `uv sync --extra mlx`.
+    cosyvoice_model: str = "mlx-community/Fun-CosyVoice3-0.5B-2512-4bit"
+    cosyvoice_sleep_instruct: str = (
+        "Speak softly, gently, and very slowly, with a calm, soothing, hypnotic rhythm."
+    )
+    # Cap MLX's Metal buffer cache (MB). Over a 30–90 min job the cache balloons
+    # and tips into SSD swap, collapsing throughput to single-digit tok/s. 0 keeps
+    # MLX's own default (no cap). A value like 1024 holds peak memory steady.
+    mlx_cache_mb: int = 0
+
     # Per-provider chunk budgets (characters). Long text is split into bounded
     # chunks before synthesis so Kokoro stays under its 510 phoneme-token cap and
     # F5 stays within ~30s/pass. See core/chunker.py for the char-vs-token note.
     kokoro_chunk_chars: int = 400
     f5_chunk_chars: int = 250  # ~18s/pass: well under F5's ~30s garble edge
+    cosyvoice_chunk_chars: int = 300  # keep chunks under CosyVoice3's ~30s ref window
     elevenlabs_chunk_chars: int = 2400
 
     # Sleep stories (single-speaker, calming treatment — NOT applied to podcasts).
@@ -100,12 +136,28 @@ class Settings(BaseSettings):
     sleep_default_pause_ms: int = 900  # inter-sentence silence
     sleep_sample_rate: int = 44100
     sleep_channels: int = 2  # sleep masters are stereo
-    sleep_target_lufs: float = -20.0  # EBU R128 integrated loudness target
+    sleep_target_lufs: float = -18.0  # EBU R128 integrated loudness target (calm but audible)
+    sleep_true_peak_db: float = -2.0  # loudnorm true-peak ceiling (research: -2 to -3 dBTP)
     sleep_lowpass_hz: int = 8000  # gentle high-frequency roll-off
     sleep_fade_in_s: float = 2.0
     sleep_fade_out_s: float = 5.0
+    # Progressive "ramp-down": the story gently decelerates toward sleep onset.
+    # Per-chunk speed eases from the baseline to baseline*end_factor, and the
+    # inter-sentence pause grows up to pause_scale×, both interpolated over the
+    # story. Gated per request by SleepStoryRequest.ramp (default on).
+    sleep_ramp_speed_end_factor: float = 0.94  # ~6% slower by the final chunk
+    sleep_ramp_pause_scale: float = 1.6  # final pauses ~60% longer than the first
     ambient_bed_gain_db: float = -22.0  # how far under the narration the bed sits
     ambient_dir: Path = _DEFAULT_ASSETS_DIR / "ambient"
+
+    # Long-form quality control (opt-in post-step; deps via `uv sync --extra qc`).
+    # Off by default — it transcribes the whole master and embeds windows, so it
+    # roughly doubles a job's wall-clock. Turn on to catch hallucinated/dropped
+    # words (WER) and cloned-voice drift (SIM) over a 30–90 min render.
+    enable_qc: bool = False
+    qc_whisper_mlx_repo: str = "mlx-community/whisper-base-mlx"  # Apple Silicon ASR
+    qc_whisper_faster_size: str = "base"  # faster-whisper CPU fallback size
+    qc_sim_threshold: float = 0.75  # flag windows below this cosine similarity
 
     # Voice catalog (empty -> offer all account voices)
     voice_catalog: list[VoiceCatalogEntry] = Field(default_factory=list)

@@ -14,25 +14,52 @@ depends on the job store or the API — it can be driven straight from a test.
 
 from __future__ import annotations
 
+import logging
 import random
+import re
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from app.config import Settings
-from app.providers import registry
+from app.providers import reference_voice_registry, registry
 from app.storage import ambient_registry, files
 
-from . import ambient, chunker, ffmpeg_stitch, sleep_post, text_processor
+from . import ambient, chunker, ffmpeg_stitch, qc, sleep_post, sleep_text, text_processor
 from .errors import AmbientBedError, VoiceAssignmentError
 from .models import (
     GeneratedFile,
     GenerateResult,
     PodcastRequest,
+    QCReport,
     SegmentInfo,
     SleepStoryRequest,
 )
 from .script_parser import distinct_speakers, parse_script
+
+logger = logging.getLogger("moodscape")
+
+# Providers that clone from a reference clip — the only ones speaker-similarity QC
+# can score (it needs the reference timbre to compare against).
+_CLONE_PROVIDERS = {"f5", "cosyvoice"}
+
+# Cross-chunk continuity context: how many trailing/leading characters of an
+# adjacent chunk we hand the model as previous_text/next_text. ElevenLabs uses it
+# to match pitch/tone across a hard chunk boundary.
+_CONTINUITY_CHARS = 200
+_BRACKET_TAG_RE = re.compile(r"\[[^\]]*\]")
+
+
+def _continuity_text(text: str, *, tail: bool) -> str:
+    """Trailing (``tail``) or leading slice of ``text`` for continuity context.
+
+    Bracket tags are stripped so a performed cue ([warmly]) never leaks into the
+    next chunk's context window and gets double-performed.
+    """
+    cleaned = re.sub(r"\s{2,}", " ", _BRACKET_TAG_RE.sub("", text)).strip()
+    if not cleaned:
+        return ""
+    return cleaned[-_CONTINUITY_CHARS:] if tail else cleaned[:_CONTINUITY_CHARS]
 
 
 def _noop(*, step: str, chunks_done: int, chunks_total: int) -> None:
@@ -43,6 +70,7 @@ def _chunk_overrides(settings: Settings) -> dict[str, int]:
     return {
         "kokoro": settings.kokoro_chunk_chars,
         "f5": settings.f5_chunk_chars,
+        "cosyvoice": settings.cosyvoice_chunk_chars,
         "elevenlabs": settings.elevenlabs_chunk_chars,
     }
 
@@ -50,7 +78,12 @@ def _chunk_overrides(settings: Settings) -> dict[str, int]:
 # ── podcast pacing plan ──────────────────────────────────────────────────────
 @dataclass(frozen=True)
 class _Speech:
-    """One synthesis op plus the micro-pause that should follow it."""
+    """One synthesis op plus the micro-pause that should follow it.
+
+    ``prev_text`` / ``next_text`` are the continuity context drawn from the
+    neighbouring speech ops (populated in a post-pass once the full op list is
+    known); they are forwarded only to continuity-capable providers.
+    """
 
     text: str
     provider: str
@@ -60,6 +93,8 @@ class _Speech:
     turn_index: int
     emotion: str | None
     gap_after_ms: int
+    prev_text: str = ""
+    next_text: str = ""
 
 
 @dataclass(frozen=True)
@@ -84,46 +119,99 @@ def _draw_speed(rng: random.Random, settings: Settings) -> float:
 
 
 def _podcast_voice_settings(
-    provider, emotion: str | None, model_id: str | None,
-    rng: random.Random, settings: Settings,
+    provider, op: "_Speech", rng: random.Random, settings: Settings,
+    *, seed: int | None,
 ) -> dict | None:
     """Per-chunk voice_settings, tailored to the provider's declared capabilities.
 
     Speed-aware local models (``consumes_local_speed``) get a jittered rate
     multiplier. Native-speed cloud providers (``has_native_speed``, i.e.
     ElevenLabs) additionally get a content-type hint + optional model override so
-    the provider can pick the right v2/v3 profile. Returns ``None`` when nothing
-    applies so providers fall back to their defaults (pre-feature behaviour).
+    the provider can pick the right v2/v3 profile, plus cross-chunk continuity
+    context and an optional deterministic ``seed`` when the provider advertises
+    those. Returns ``None`` when nothing applies so providers fall back to their
+    defaults (pre-feature behaviour).
     """
     vs: dict = {}
-    if emotion:
-        vs["emotion"] = emotion
+    if op.emotion:
+        vs["emotion"] = op.emotion
     if provider.has_native_speed:
         vs["content_type"] = "podcast"
-        if model_id:
-            vs["model_id"] = model_id
+        if op.model_id:
+            vs["model_id"] = op.model_id
         vs["speed"] = _draw_speed(rng, settings)
     elif provider.consumes_local_speed:
         vs["speed"] = _draw_speed(rng, settings)
+    if getattr(provider, "accepts_continuity", False):
+        if op.prev_text:
+            vs["previous_text"] = op.prev_text
+        if op.next_text:
+            vs["next_text"] = op.next_text
+        if seed is not None:
+            vs["seed"] = seed
     return vs or None
 
 
-def _sleep_voice_settings(provider, request: SleepStoryRequest, speed: float) -> dict | None:
+def _sleep_voice_settings(
+    provider, request: SleepStoryRequest, speed: float, settings: Settings,
+    *, prev_text: str = "", next_text: str = "",
+) -> dict | None:
     """Sleep-story voice_settings, tailored to the provider's capabilities.
 
-    Local models get the slow ``speed`` as a rate multiplier. ElevenLabs
-    (``has_native_speed``) gets a calm content-type profile + native slow speed
-    + optional model override, so the *voice itself* narrates gently before the
-    sleep mastering chain runs. Returns ``None`` when nothing applies.
+    Instruct-capable models (``accepts_instruct``, i.e. CosyVoice3) get a
+    natural-language delivery directive — the calm/hypnotic pace rides this, not
+    a numeric rate, so it holds regardless of the cloned clip's energy. The
+    directive defaults to ``cosyvoice_sleep_instruct`` and is overridable per
+    story via ``style_prompt``. ElevenLabs (``has_native_speed``) gets a calm
+    content-type profile + native (per-chunk ramped) speed + optional model
+    override, plus cross-chunk continuity context and an optional ``seed``. Plain
+    local models (``consumes_local_speed``) get the slow ``speed`` as a rate
+    multiplier. Returns ``None`` when nothing applies.
+
+    ``speed`` is the effective per-chunk speed (already ramped by the caller).
     """
     if provider.has_native_speed:
         vs: dict = {"content_type": "sleep", "speed": speed}
         if request.model_id:
             vs["model_id"] = request.model_id
+        if getattr(provider, "accepts_continuity", False):
+            if prev_text:
+                vs["previous_text"] = prev_text
+            if next_text:
+                vs["next_text"] = next_text
+            if request.seed is not None:
+                vs["seed"] = request.seed
         return vs
+    if provider.accepts_instruct:
+        instruct = request.style_prompt or settings.cosyvoice_sleep_instruct
+        return {"instruct": instruct} if instruct else None
     if provider.consumes_local_speed:
         return {"speed": speed}
     return None
+
+
+def _lerp(start: float, end: float, frac: float) -> float:
+    return start + (end - start) * frac
+
+
+def _sleep_ramp(
+    request: SleepStoryRequest, base_speed: float, base_pause_ms: int,
+    index: int, total: int, settings: Settings,
+) -> tuple[float, int]:
+    """Effective (speed, pause_ms) for chunk ``index`` of a sleep story.
+
+    With ``ramp`` on (default), speed eases from the baseline toward
+    ``baseline * sleep_ramp_speed_end_factor`` and the inter-sentence pause grows
+    toward ``base_pause_ms * sleep_ramp_pause_scale`` — both linearly over the
+    story so the narration gently decelerates toward sleep onset. Pure function of
+    ``index`` (deterministic, no RNG). With ``ramp`` off, returns the fixed values.
+    """
+    if not request.ramp or total <= 1:
+        return base_speed, base_pause_ms
+    frac = index / (total - 1)
+    speed = base_speed * _lerp(1.0, settings.sleep_ramp_speed_end_factor, frac)
+    pause = round(base_pause_ms * _lerp(1.0, settings.sleep_ramp_pause_scale, frac))
+    return speed, pause
 
 
 def _build_podcast_ops(
@@ -151,6 +239,7 @@ def _build_podcast_ops(
             rng=rng,
             gap_min_ms=settings.podcast_intra_sentence_gap_ms_min,
             gap_max_ms=settings.podcast_intra_sentence_gap_ms_max,
+            inline_sfx=registry.get(assignment.provider).accepts_inline_sfx,
         )
         for item in items:
             if isinstance(item, text_processor.Pause):
@@ -170,6 +259,25 @@ def _build_podcast_ops(
                     )
                 )
         prev_turn_index = turn.index
+    return _link_continuity(ops)
+
+
+def _link_continuity(ops: list) -> list:
+    """Populate each ``_Speech``'s prev/next continuity context from its neighbours.
+
+    Context flows across the whole rendered sequence (including speaker changes),
+    matching how the research stitches turns; intervening ``_Silence`` ops are
+    skipped. Bracket tags are stripped by ``_continuity_text``.
+    """
+    speech_idx = [i for i, op in enumerate(ops) if isinstance(op, _Speech)]
+    for pos, i in enumerate(speech_idx):
+        prev_text = ""
+        next_text = ""
+        if pos > 0:
+            prev_text = _continuity_text(ops[speech_idx[pos - 1]].text, tail=True)
+        if pos < len(speech_idx) - 1:
+            next_text = _continuity_text(ops[speech_idx[pos + 1]].text, tail=False)
+        ops[i] = replace(ops[i], prev_text=prev_text, next_text=next_text)
     return ops
 
 
@@ -222,8 +330,81 @@ def run(
     report = reporter or _noop
     job_id = job_id or files.new_job_id()
     if isinstance(request, SleepStoryRequest):
-        return _run_sleep(request, settings, report, job_id)
-    return _run_podcast(request, settings, report, job_id)
+        result = _run_sleep(request, settings, report, job_id)
+    else:
+        result = _run_podcast(request, settings, report, job_id)
+
+    if settings.enable_qc:
+        _attach_qc(result, request, settings, report, job_id)
+    return result
+
+
+# ── quality control (opt-in, non-fatal) ────────────────────────────────────────
+def _clone_reference(provider: str, voice_id: str, settings: Settings) -> str | None:
+    """Path to the reference clip for a cloned voice, or None if not applicable."""
+    if provider not in _CLONE_PROVIDERS:
+        return None
+    entry = reference_voice_registry.scan(settings.assets_dir).get(voice_id)
+    return str(entry["audio"]) if entry else None
+
+
+def _qc_inputs(
+    request: PodcastRequest | SleepStoryRequest, settings: Settings
+) -> tuple[str, str | None]:
+    """Return (source_text, reference_clip) for QC.
+
+    The reference clip is supplied only when exactly one cloned voice is in play
+    (sleep stories are single-voice; a podcast with one distinct cloned voice
+    qualifies) — that's the only case speaker-similarity can score.
+    """
+    if isinstance(request, SleepStoryRequest):
+        return request.prose_text, _clone_reference(
+            request.provider, request.voice_id, settings
+        )
+    source = " ".join(t.text for t in parse_script(request.script_text))
+    cloned = {
+        (sv.provider, sv.voice_id)
+        for sv in request.speakers.values()
+        if sv.provider in _CLONE_PROVIDERS
+    }
+    ref = None
+    if len(cloned) == 1:
+        provider, voice_id = next(iter(cloned))
+        ref = _clone_reference(provider, voice_id, settings)
+    return source, ref
+
+
+def _master_path(result: GenerateResult, settings: Settings, job_id: str) -> Path | None:
+    """Resolve the rendered master on disk — prefer a WAV, else the first file."""
+    out_dir = files.job_dir(settings.output_dir, job_id)
+    wavs = [f for f in result.files if f.format == "wav"]
+    chosen = (wavs or result.files or [None])[0]
+    return out_dir / chosen.filename if chosen else None
+
+
+def _attach_qc(
+    result: GenerateResult,
+    request: PodcastRequest | SleepStoryRequest,
+    settings: Settings,
+    report,
+    job_id: str,
+) -> None:
+    """Run QC on the finished master and attach the report. Never fatal."""
+    try:
+        master = _master_path(result, settings, job_id)
+        if master is None or not master.is_file():
+            return
+        source, reference = _qc_inputs(request, settings)
+        report(step="Quality check", chunks_done=0, chunks_total=0)
+        result.qc = qc.run_qc(
+            str(master),
+            source_text=source,
+            settings=settings,
+            reference_audio=reference,
+        )
+    except Exception as exc:  # noqa: BLE001 - QC must never fail a good render
+        logger.warning("QC step failed: %s", exc)
+        result.qc = QCReport(notes=[f"QC failed: {exc}"])
 
 
 # ── podcast ──────────────────────────────────────────────────────────────────
@@ -271,12 +452,15 @@ def _run_podcast(
                 continue
 
             provider = registry.get(op.provider)
-            vs = _podcast_voice_settings(provider, op.emotion, op.model_id, rng, settings)
+            vs = _podcast_voice_settings(provider, op, rng, settings, seed=request.seed)
             seg = provider.synthesize(
                 op.text, op.voice_id, output_format=output_format, voice_settings=vs
             )
             chunk_path = work_dir / f"chunk_{chunk_counter:05d}.wav"
-            ffmpeg_stitch.segment_to_wav_file(seg, chunk_path, sample_rate=rate, channels=1)
+            ffmpeg_stitch.segment_to_wav_file(
+                seg, chunk_path, sample_rate=rate, channels=1,
+                edge_fade_ms=settings.chunk_edge_fade_ms,
+            )
             concat_paths.append(chunk_path)
             chunk_counter += 1
 
@@ -319,7 +503,10 @@ def _run_podcast(
             provider = registry.get(provider_name)
             seg = provider.synthesize(chunk.text, voice_id, output_format=output_format)
             chunk_path = work_dir / f"chunk_{i:05d}.wav"
-            ffmpeg_stitch.segment_to_wav_file(seg, chunk_path, sample_rate=rate, channels=1)
+            ffmpeg_stitch.segment_to_wav_file(
+                seg, chunk_path, sample_rate=rate, channels=1,
+                edge_fade_ms=settings.chunk_edge_fade_ms,
+            )
             concat_paths.append(chunk_path)
 
             turn_durations[chunk.turn_index] = turn_durations.get(chunk.turn_index, 0) + len(seg)
@@ -364,8 +551,8 @@ def _run_podcast(
 def _run_sleep(
     request: SleepStoryRequest, settings: Settings, report, job_id: str
 ) -> GenerateResult:
-    speed = request.speed if request.speed is not None else settings.sleep_default_speed
-    pause_ms = (
+    base_speed = request.speed if request.speed is not None else settings.sleep_default_speed
+    base_pause_ms = (
         request.pause_ms if request.pause_ms is not None else settings.sleep_default_pause_ms
     )
     rate = settings.sleep_sample_rate
@@ -373,7 +560,6 @@ def _run_sleep(
     overrides = _chunk_overrides(settings)
 
     provider = registry.get(provider_name)
-    voice_settings = _sleep_voice_settings(provider, request, speed)
 
     # Validate the ambient bed up front so we fail fast (before synthesis).
     bed_path: Path | None = None
@@ -385,7 +571,11 @@ def _run_sleep(
                 f"Ambient bed {request.ambient_bed!r} not found in {settings.ambient_dir}."
             )
 
-    plan = chunker.chunk_prose(request.prose_text, provider_name, overrides=overrides)
+    # Spell out standalone numbers so the narrator never reads bare digits in a
+    # clipped, transactional tone (the provider's apply_text_normalization handles
+    # the rest server-side).
+    prose = sleep_text.spell_numbers(request.prose_text)
+    plan = chunker.chunk_prose(prose, provider_name, overrides=overrides)
     total = len(plan)
 
     out_dir = files.job_dir(settings.output_dir, job_id)
@@ -397,6 +587,10 @@ def _run_sleep(
     gap_counter = 0
 
     for i, chunk in enumerate(plan):
+        # Progressive ramp-down: per-chunk speed/pause ease toward sleep onset.
+        speed, pause_ms = _sleep_ramp(
+            request, base_speed, base_pause_ms, i, total, settings
+        )
         if i > 0 and pause_ms > 0:
             gap_path = work_dir / f"pause_{gap_counter:05d}.wav"
             ffmpeg_stitch.silence_wav(gap_path, duration_ms=pause_ms, sample_rate=rate)
@@ -404,6 +598,14 @@ def _run_sleep(
             narration_ms += pause_ms
             gap_counter += 1
 
+        prev_text = _continuity_text(plan[i - 1].text, tail=True) if i > 0 else ""
+        next_text = (
+            _continuity_text(plan[i + 1].text, tail=False) if i < total - 1 else ""
+        )
+        voice_settings = _sleep_voice_settings(
+            provider, request, speed, settings,
+            prev_text=prev_text, next_text=next_text,
+        )
         seg = provider.synthesize(
             chunk.text,
             request.voice_id,
@@ -411,7 +613,10 @@ def _run_sleep(
             voice_settings=voice_settings,
         )
         chunk_path = work_dir / f"chunk_{i:05d}.wav"
-        ffmpeg_stitch.segment_to_wav_file(seg, chunk_path, sample_rate=rate, channels=1)
+        ffmpeg_stitch.segment_to_wav_file(
+            seg, chunk_path, sample_rate=rate, channels=1,
+            edge_fade_ms=settings.chunk_edge_fade_ms,
+        )
         concat_paths.append(chunk_path)
         narration_ms += len(seg)
         report(step=f"Synthesizing {i + 1}/{total}", chunks_done=i + 1, chunks_total=total)
