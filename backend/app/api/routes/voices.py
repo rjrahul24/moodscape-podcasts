@@ -35,11 +35,17 @@ def _elevenlabs_voices(settings, provider) -> list[Voice]:
     resolved: list[Voice] = []
     for entry in catalog:
         found = by_id.get(entry.id)
-        resolved.append(
-            found
-            if found is not None
-            else Voice(id=entry.id, name=entry.label or entry.id, provider=provider.name)
-        )
+        if found is not None:
+            # Prefer the catalog label over the API-returned name when set.
+            if entry.label:
+                found = Voice(
+                    id=found.id, name=entry.label, provider=found.provider, category=found.category
+                )
+            resolved.append(found)
+        else:
+            resolved.append(
+                Voice(id=entry.id, name=entry.label or entry.id, provider=provider.name)
+            )
     return resolved
 
 

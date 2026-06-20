@@ -30,6 +30,8 @@ from dataclasses import dataclass
 from . import chunker
 from .emotion import EMOTIONS, SFX_PAUSE_MS, sfx_pause_ms
 
+_BRACKET_TAG_RE = re.compile(r"\[[^\]]*\]")
+
 # Explicit author pause: [pause:600] or [pause:600ms] (whitespace tolerant).
 _PAUSE_RE = re.compile(r"\[pause:\s*(\d+)\s*(?:ms)?\]", re.IGNORECASE)
 # A single leading bracket tag at the start of a span, e.g. "[excited] ...".
@@ -131,9 +133,9 @@ def plan_turn(
         for j, sentence in enumerate(sentences):
             pieces = chunker.chunk_text(sentence, max_chars)
             for k, piece in enumerate(pieces):
+                if not _BRACKET_TAG_RE.sub("", piece).strip():
+                    continue
                 is_last_piece = k == len(pieces) - 1
-                # Only the end of a sentence (that isn't the span's last) earns a
-                # micro-pause; sub-pieces of one sentence run together.
                 if is_last_piece and j < last_sentence:
                     gap = rng.randint(lo, hi)
                 else:

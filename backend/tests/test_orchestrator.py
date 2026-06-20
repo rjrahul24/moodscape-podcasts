@@ -288,7 +288,7 @@ def test_podcast_passes_content_type_and_model_to_elevenlabs(settings, clean_reg
         assert vs["content_type"] == "podcast"
         assert vs["model_id"] == "eleven_v3"
         assert vs["emotion"] == "calm"
-        assert 0.9 < vs["speed"] < 1.1  # native speed, jittered around 1.0
+        assert vs["speed"] == 1.0  # fixed base speed for cloud providers (no jitter)
         assert "[calm]" not in c["text"]  # tag stripped by the planner
 
 

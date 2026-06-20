@@ -25,9 +25,21 @@ def test_audio_container_mapping():
     assert audio_container("opus_48000_128") == "ogg"
 
 
-def test_audio_container_rejects_raw_pcm():
-    with pytest.raises(ValueError):
-        audio_container("pcm_44100")
+def test_audio_container_maps_raw_pcm():
+    assert audio_container("pcm_44100") == "raw_pcm"
+    assert audio_container("pcm_24000") == "raw_pcm"
+
+
+def test_bytes_to_segment_roundtrip_pcm():
+    sr = 44100
+    duration_s = 0.5
+    n_samples = int(sr * duration_s)
+    samples = np.zeros(n_samples, dtype="<i2")
+    seg = bytes_to_segment(samples.tobytes(), f"pcm_{sr}")
+    assert seg.frame_rate == sr
+    assert seg.channels == 1
+    assert seg.sample_width == 2
+    assert abs(len(seg) - 500) < 20
 
 
 def test_bytes_to_segment_roundtrip_wav():

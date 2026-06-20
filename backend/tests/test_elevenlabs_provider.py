@@ -254,6 +254,30 @@ def test_continuity_and_seed_are_top_level_fields():
 
 
 @respx.mock
+def test_v3_drops_continuity():
+    """v3 does not support previous_text/next_text — verify they are not sent."""
+    route = respx.post(f"{BASE}/v1/text-to-speech/v1").mock(
+        return_value=httpx.Response(200, content=b"FAKEAUDIO")
+    )
+    provider = ElevenLabsProvider("test-key", base_url=BASE)
+    provider.synthesize_bytes(
+        "the present moment.", "v1", output_format="wav_44100",
+        voice_settings={
+            "content_type": "podcast",
+            "model_id": "eleven_v3",
+            "previous_text": "settle into",
+            "next_text": "you are safe",
+            "seed": 99,
+        },
+    )
+    body = json.loads(route.calls.last.request.content)
+    assert body["model_id"] == "eleven_v3"
+    assert "previous_text" not in body
+    assert "next_text" not in body
+    assert body["seed"] == 99
+
+
+@respx.mock
 def test_speaker_boost_and_normalization_are_configurable():
     route = respx.post(f"{BASE}/v1/text-to-speech/v1").mock(
         return_value=httpx.Response(200, content=b"FAKEAUDIO")

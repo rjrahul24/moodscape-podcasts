@@ -173,10 +173,6 @@ class ElevenLabsProvider(TTSProvider):
         prev_text = vs.pop("previous_text", None)
         next_text = vs.pop("next_text", None)
         seed = vs.pop("seed", None)
-        if prev_text:
-            extras["previous_text"] = prev_text
-        if next_text:
-            extras["next_text"] = next_text
         if seed is not None:
             extras["seed"] = seed
         # Whatever remains is an explicit EL override (stability/style/…).
@@ -185,6 +181,10 @@ class ElevenLabsProvider(TTSProvider):
             text, body = self._prepare_v3(text, content_type, emotion, speed)
         else:
             text, body = self._prepare_v2(text, content_type, emotion, speed)
+            if prev_text:
+                extras["previous_text"] = prev_text
+            if next_text:
+                extras["next_text"] = next_text
         body["use_speaker_boost"] = self._use_speaker_boost
         body.update(vs)
         return text, model_id, (body or None), extras
@@ -211,7 +211,7 @@ class ElevenLabsProvider(TTSProvider):
         stability = V3_STABILITY.get(content_type, 0.5)
         if emotion == "excited":
             stability = 0.0  # Creative for high energy
-        body: dict = {"stability": stability, "similarity_boost": 0.85}
+        body: dict = {"stability": stability, "similarity_boost": 0.80}
         if content_type == "podcast":
             # Unforced, organic dialogue — research recommends style 0.0 over the
             # model's tendency to over-dramatize.
@@ -252,6 +252,14 @@ class ElevenLabsProvider(TTSProvider):
     ) -> bytes:
         """Request encoded audio bytes from the ElevenLabs API."""
         text, model_id, resolved, extras = self._prepare(text, voice_settings)
+        words_only = _BRACKET_TAG_RE.sub("", text).strip()
+        if not words_only:
+            raise ProviderError(
+                self.name,
+                "Synthesis received text with no actual words after removing "
+                "bracket tags (got only tags like [laughs]/[sighs]). "
+                "Ensure every turn has spoken words, not just delivery cues.",
+            )
         body: dict = {"text": text, "model_id": model_id}
         if resolved:
             body["voice_settings"] = resolved

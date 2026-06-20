@@ -28,7 +28,7 @@ DEFAULT_BUDGETS: dict[str, int] = {
     "kokoro": 400,  # well under Kokoro's 510 phoneme-token cap, no "rushed" artifacts
     "f5": 250,  # ~18s of narration; stay well under F5's ~30s garble edge
     "cosyvoice": 300,  # keep chunks under CosyVoice3's ~30s reference window
-    "elevenlabs": 2400,  # cloud handles long text; chunk mainly for progress granularity
+    "elevenlabs": 1000,  # quality sweet spot; >2000 chars causes pacing drift in EL models
 }
 
 # Fallback for any provider not in DEFAULT_BUDGETS (e.g. a future provider).

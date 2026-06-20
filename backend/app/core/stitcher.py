@@ -24,18 +24,19 @@ def audio_container(output_format: str) -> str:
     if codec == "opus":
         return "ogg"  # opus is carried in an ogg container
     if codec == "pcm":
-        # Raw PCM has no header; we don't request it (see SEGMENT_OUTPUT_FORMAT),
-        # but fail loudly rather than silently mis-decode if someone does.
-        raise ValueError(
-            "Raw 'pcm_*' output is not supported for stitching; use 'wav_*' or "
-            "'mp3_*' instead."
-        )
+        return "raw_pcm"
     return codec
 
 
 def bytes_to_segment(data: bytes, output_format: str) -> AudioSegment:
     """Decode encoded audio ``data`` (in ``output_format``) into an AudioSegment."""
-    return AudioSegment.from_file(BytesIO(data), format=audio_container(output_format))
+    container = audio_container(output_format)
+    if container == "raw_pcm":
+        sample_rate = int(output_format.split("_")[1])
+        return AudioSegment(
+            data=data, sample_width=2, frame_rate=sample_rate, channels=1,
+        )
+    return AudioSegment.from_file(BytesIO(data), format=container)
 
 
 def numpy_to_segment(samples: np.ndarray, sample_rate: int) -> AudioSegment:
