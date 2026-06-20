@@ -120,7 +120,7 @@ def _apply_silero_vad(audio: np.ndarray, sr: int) -> np.ndarray:
 _REF_TARGET_DBFS = -20.0
 
 
-def _condition_reference_audio(audio_path: str, sr: int) -> str:
+def _condition_reference_audio(audio_path: str) -> str:
     """Condition reference audio: RMS-normalize + append trailing noise pad.
 
     The trailing noise (~1s at -55 dBFS) prevents F5's duration heuristic from
@@ -317,7 +317,7 @@ class F5Provider(TTSProvider):
             ) from exc
 
         # Condition: RMS-normalize + trailing noise pad
-        conditioned = _condition_reference_audio(proc_audio, SAMPLE_RATE)
+        conditioned = _condition_reference_audio(proc_audio)
 
         self._ref_cache[slug] = {"audio": conditioned, "text": proc_text}
         return self._ref_cache[slug]

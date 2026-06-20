@@ -119,7 +119,7 @@ def test_condition_reference_audio_adds_trailing_pad(tmp_path):
 
     from app.providers.f5_provider import _condition_reference_audio
 
-    conditioned = _condition_reference_audio(str(original), sr)
+    conditioned = _condition_reference_audio(str(original))
     cond_audio, cond_sr = sf.read(conditioned, dtype="float32")
     # Should be ~1s longer (the trailing noise pad)
     assert len(cond_audio) > len(audio)

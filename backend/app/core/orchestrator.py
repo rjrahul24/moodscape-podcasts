@@ -842,8 +842,6 @@ def _run_sleep(
 
         for j, (piece_text, pause_after_ms) in enumerate(pieces):
             tone, piece_text = _sleep_tone(piece_text, settings)
-            if provider_name == "f5":
-                piece_text = f5_text.normalize_for_f5(piece_text)
             if piece_text.strip():
                 voice_settings = _sleep_voice_settings(
                     provider, request, speed, settings,
