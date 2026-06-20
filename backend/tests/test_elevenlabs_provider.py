@@ -124,7 +124,7 @@ def test_v3_injects_inline_audio_tag_and_discrete_stability():
 
 
 @respx.mock
-def test_v3_sleep_is_robust_and_untagged():
+def test_v3_sleep_uses_natural_stability_so_tags_respond():
     route = respx.post(f"{BASE}/v1/text-to-speech/v1").mock(
         return_value=httpx.Response(200, content=b"FAKEAUDIO")
     )
@@ -135,8 +135,125 @@ def test_v3_sleep_is_robust_and_untagged():
     )
     body = json.loads(route.calls.last.request.content)
     assert body["text"] == "The night was calm."  # no tag without an emotion
-    assert body["voice_settings"]["stability"] == 1.0  # Robust for sleep
+    # Natural (0.5), not Robust (1.0): keeps the calming inline tags responsive.
+    assert body["voice_settings"]["stability"] == 0.5
     assert body["voice_settings"]["speed"] == 0.85
+
+
+@respx.mock
+def test_v3_sleep_stability_is_configurable():
+    route = respx.post(f"{BASE}/v1/text-to-speech/v1").mock(
+        return_value=httpx.Response(200, content=b"FAKEAUDIO")
+    )
+    provider = ElevenLabsProvider("test-key", base_url=BASE, sleep_v3_stability=1.0)
+    provider.synthesize_bytes(
+        "The night was calm.", "v1", output_format="wav_44100",
+        voice_settings={"content_type": "sleep", "model_id": "eleven_v3"},
+    )
+    body = json.loads(route.calls.last.request.content)
+    assert body["voice_settings"]["stability"] == 1.0
+
+
+@respx.mock
+def test_v3_sleep_pacing_tag_off_by_default():
+    route = respx.post(f"{BASE}/v1/text-to-speech/v1").mock(
+        return_value=httpx.Response(200, content=b"FAKEAUDIO")
+    )
+    provider = ElevenLabsProvider("test-key", base_url=BASE)
+    provider.synthesize_bytes(
+        "The night was calm.", "v1", output_format="wav_44100",
+        voice_settings={"content_type": "sleep", "model_id": "eleven_v3"},
+    )
+    body = json.loads(route.calls.last.request.content)
+    assert body["text"] == "The night was calm."  # unchanged when tag is empty
+
+
+@respx.mock
+def test_v3_sleep_pacing_tag_reasserted_after_emotion():
+    route = respx.post(f"{BASE}/v1/text-to-speech/v1").mock(
+        return_value=httpx.Response(200, content=b"FAKEAUDIO")
+    )
+    provider = ElevenLabsProvider(
+        "test-key", base_url=BASE, sleep_v3_pacing_tag="[slowly]"
+    )
+    provider.synthesize_bytes(
+        "The night was calm.", "v1", output_format="wav_44100",
+        voice_settings={"content_type": "sleep", "model_id": "eleven_v3",
+                        "emotion": "calm"},
+    )
+    body = json.loads(route.calls.last.request.content)
+    # Emotion tag first, then the pacing tag: "[calm] [slowly] …".
+    assert body["text"] == "[calm] [slowly] The night was calm."
+
+
+@respx.mock
+def test_v3_pacing_tag_not_applied_to_podcast():
+    route = respx.post(f"{BASE}/v1/text-to-speech/v1").mock(
+        return_value=httpx.Response(200, content=b"FAKEAUDIO")
+    )
+    provider = ElevenLabsProvider(
+        "test-key", base_url=BASE, sleep_v3_pacing_tag="[slowly]"
+    )
+    provider.synthesize_bytes(
+        "A bright morning.", "v1", output_format="wav_44100",
+        voice_settings={"content_type": "podcast", "model_id": "eleven_v3"},
+    )
+    body = json.loads(route.calls.last.request.content)
+    assert "[slowly]" not in body["text"]
+
+
+@respx.mock
+def test_v2_translates_pause_marker_to_native_break():
+    route = respx.post(f"{BASE}/v1/text-to-speech/v1").mock(
+        return_value=httpx.Response(200, content=b"FAKEAUDIO")
+    )
+    provider = ElevenLabsProvider("test-key", base_url=BASE)
+    provider.synthesize_bytes(
+        "Rest now. [pause:800] The lake is still. [pause:5000ms] Sleep.", "v1",
+        output_format="wav_44100",
+        voice_settings={"content_type": "sleep"},  # v2 default model
+    )
+    body = json.loads(route.calls.last.request.content)
+    # [pause:800] -> 0.80s; [pause:5000ms] clamped to the API's 3s ceiling.
+    assert body["text"] == (
+        'Rest now. <break time="0.80s"/> The lake is still. '
+        '<break time="3.00s"/> Sleep.'
+    )
+
+
+@respx.mock
+def test_v2_translates_bare_pause_to_default_break():
+    route = respx.post(f"{BASE}/v1/text-to-speech/v1").mock(
+        return_value=httpx.Response(200, content=b"FAKEAUDIO")
+    )
+    provider = ElevenLabsProvider("test-key", base_url=BASE)
+    provider.synthesize_bytes(
+        "Rest now. [pause] The lake is still.", "v1",
+        output_format="wav_44100",
+        voice_settings={"content_type": "sleep"},
+    )
+    body = json.loads(route.calls.last.request.content)
+    # Bare [pause] -> 1.00s default break.
+    assert body["text"] == (
+        'Rest now. <break time="1.00s"/> The lake is still.'
+    )
+
+
+@respx.mock
+def test_v2_native_breaks_can_be_disabled():
+    route = respx.post(f"{BASE}/v1/text-to-speech/v1").mock(
+        return_value=httpx.Response(200, content=b"FAKEAUDIO")
+    )
+    provider = ElevenLabsProvider("test-key", base_url=BASE, v2_native_breaks=False)
+    provider.synthesize_bytes(
+        "Rest now. [pause:800] The lake is still.", "v1",
+        output_format="wav_44100",
+        voice_settings={"content_type": "sleep"},
+    )
+    body = json.loads(route.calls.last.request.content)
+    # With native breaks off the marker is stripped like any other [...] tag
+    # (the orchestrator splices silence for this engine instead).
+    assert body["text"] == "Rest now. The lake is still."
 
 
 @respx.mock

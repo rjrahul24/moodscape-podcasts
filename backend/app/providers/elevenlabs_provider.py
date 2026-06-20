@@ -45,10 +45,16 @@ EMOTION_PROFILES: dict[str, dict[str, float]] = {
     "sad": {"stability": 0.70, "similarity_boost": 0.80, "style": 0.40},
     "whispering": {"stability": 0.90, "similarity_boost": 0.60, "style": 0.05},
     "neutral": {"stability": 0.55, "similarity_boost": 0.80, "style": 0.25},
-    # Mindfulness-leaning tones: steady, low-style, gently warm.
-    "soothing": {"stability": 0.88, "similarity_boost": 0.75, "style": 0.10},
+    # Mindfulness-leaning tones: gently warm with real prosodic life. ``soothing``
+    # is the default sleep tone — moderate ``style`` gives v2 emotional warmth
+    # (it can't perform inline tags, so the feeling has to come from the voice
+    # setting) while a mid-high stability keeps it steady, not a flat drone. (warm
+    # / reflective are shared with podcast v2, so they keep their original values.)
+    "soothing": {"stability": 0.68, "similarity_boost": 0.82, "style": 0.22},
     "reflective": {"stability": 0.80, "similarity_boost": 0.78, "style": 0.20},
     "warm": {"stability": 0.75, "similarity_boost": 0.82, "style": 0.30},
+    "dreamy": {"stability": 0.85, "similarity_boost": 0.78, "style": 0.10},
+    "tender": {"stability": 0.72, "similarity_boost": 0.82, "style": 0.25},
 }
 
 # v2 — per-content-type base profile used when no tone tag is present. Podcasts
@@ -71,17 +77,45 @@ V3_AUDIO_TAGS: dict[str, str] = {
     "soothing": "[calm]",
     "reflective": "[thoughtful]",
     "warm": "[warmly]",
+    "dreamy": "[calm]",
+    "tender": "[warmly]",
 }
 
-# v3 — discrete stability per content type (Natural for podcasts, Robust for the
-# steady consistency a sleep story wants). An [excited] turn drops to Creative.
-V3_STABILITY: dict[str, float] = {"podcast": 0.5, "sleep": 1.0}
+# v3 — discrete stability per content type (Natural for podcasts; sleep is set
+# from config, default Natural 0.5 so the calming inline tags stay responsive).
+# An [excited] turn drops to Creative.
+V3_STABILITY: dict[str, float] = {"podcast": 0.5, "sleep": 0.5}
+
+# v3 ignores SSML break tags, but native multilingual v2 honours them — used to
+# turn an author's [pause:N] or bare [pause] marker into a real, model-aware breath.
+V2_MODEL = "eleven_multilingual_v2"
+_PAUSE_MARKER_RE = re.compile(r"\[\s*pause\s*(?::\s*(\d+)\s*(?:ms)?\s*)?\s*\]", re.IGNORECASE)
+_BREAK_MAX_S = 3.0  # ElevenLabs caps a single <break> at 3 seconds
+_BREAK_DEFAULT_S = 1.0  # bare [pause] (no duration) defaults to 1 second
 
 _SPEED_MIN, _SPEED_MAX = 0.7, 1.2
 
 
 def _clamp_speed(speed: float) -> float:
     return max(_SPEED_MIN, min(_SPEED_MAX, float(speed)))
+
+
+def _pause_markers_to_breaks(text: str) -> str:
+    """Rewrite ``[pause:800]`` / ``[pause:800ms]`` / ``[pause]`` → ``<break time="…s"/>``.
+
+    v2 renders the native break with model-aware prosody around it — smoother than
+    a spliced silence. Durations are clamped to ElevenLabs' 3 s per-break ceiling.
+    A bare ``[pause]`` uses ``_BREAK_DEFAULT_S``. The angle-bracket tag survives
+    ``_strip_bracket_tags`` (which only removes ``[...]``), so it reaches the API
+    intact.
+    """
+
+    def repl(match: re.Match[str]) -> str:
+        raw = match.group(1)
+        seconds = min(int(raw) / 1000.0, _BREAK_MAX_S) if raw is not None else _BREAK_DEFAULT_S
+        return f'<break time="{seconds:.2f}s"/>'
+
+    return _PAUSE_MARKER_RE.sub(repl, text)
 
 
 def _strip_bracket_tags(text: str) -> str:
@@ -109,6 +143,9 @@ class ElevenLabsProvider(TTSProvider):
         sleep_model: str | None = None,
         use_speaker_boost: bool = True,
         text_normalization: str = "auto",
+        sleep_v3_stability: float = 0.5,
+        sleep_v3_pacing_tag: str = "",
+        v2_native_breaks: bool = True,
     ):
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
@@ -118,6 +155,9 @@ class ElevenLabsProvider(TTSProvider):
         self._sleep_model = sleep_model or model_id
         self._use_speaker_boost = use_speaker_boost
         self._text_normalization = text_normalization
+        self._sleep_v3_stability = sleep_v3_stability
+        self._sleep_v3_pacing_tag = sleep_v3_pacing_tag.strip()
+        self._v2_native_breaks = v2_native_breaks
 
     # ── helpers ───────────────────────────────────────────────────────────────
     def _headers(self) -> dict[str, str]:
@@ -189,9 +229,8 @@ class ElevenLabsProvider(TTSProvider):
         body.update(vs)
         return text, model_id, (body or None), extras
 
-    @staticmethod
     def _prepare_v2(
-        text: str, content_type: str, emotion: str | None, speed: float | None
+        self, text: str, content_type: str, emotion: str | None, speed: float | None
     ) -> tuple[str, dict]:
         if emotion and emotion in EMOTION_PROFILES:
             profile = dict(EMOTION_PROFILES[emotion])
@@ -199,16 +238,30 @@ class ElevenLabsProvider(TTSProvider):
             profile = dict(V2_CONTENT_BASE.get(content_type, V2_CONTENT_BASE["podcast"]))
         if speed is not None:
             profile["speed"] = _clamp_speed(speed)
+        # Render author breaths as native <break> tags (kept after the [...] strip),
+        # else they'd be dropped along with the other bracket tags.
+        if self._v2_native_breaks:
+            text = _pause_markers_to_breaks(text)
         return _strip_bracket_tags(text), profile
 
-    @staticmethod
     def _prepare_v3(
-        text: str, content_type: str, emotion: str | None, speed: float | None
+        self, text: str, content_type: str, emotion: str | None, speed: float | None
     ) -> tuple[str, dict]:
+        # Build the inline tag prefix: emotion tag first, then (for sleep) the
+        # reasserted pacing tag — e.g. "[calm] [slowly] …". The pacing tag holds
+        # v3's slow, calm register on every chunk so a long story doesn't drift
+        # toward an audiobook read.
+        prefix = ""
         tag = V3_AUDIO_TAGS.get(emotion or "", "")
         if tag:
-            text = f"{tag} {text}"
-        stability = V3_STABILITY.get(content_type, 0.5)
+            prefix += f"{tag} "
+        if content_type == "sleep" and self._sleep_v3_pacing_tag:
+            prefix += f"{self._sleep_v3_pacing_tag} "
+        if prefix:
+            text = f"{prefix}{text}"
+        stability = self._sleep_v3_stability if content_type == "sleep" else V3_STABILITY.get(
+            content_type, 0.5
+        )
         if emotion == "excited":
             stability = 0.0  # Creative for high energy
         body: dict = {"stability": stability, "similarity_boost": 0.80}
