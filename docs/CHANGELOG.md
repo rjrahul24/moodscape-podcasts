@@ -3,6 +3,120 @@
 Append-only log of notable changes and the decisions behind them. Newest first.
 Every change should add an entry (see `CLAUDE.md` → Documentation discipline).
 
+## 2026-06-20 — Sleep UX: bare [pause] support + ambient pre-roll
+
+**What changed** (sleep stories only; podcasts untouched):
+- **Bare `[pause]` tags now work.** The pause-marker regex was tightened to
+  `[pause:N]` only — a bare `[pause]` (without `:N`) was silently stripped on v2
+  and left verbatim for v3 to garble. The regex now accepts `[pause]` and uses a
+  configurable default duration (`sleep_pause_default_ms`, default 1000 ms). On
+  v2 it becomes `<break time="1.00s"/>`; on v3 and local engines it splices 1 s
+  of silence. Both `sleep_text.split_pauses` and the ElevenLabs provider's
+  `_pause_markers_to_breaks` are updated.
+- **Ambient pre-roll** (`sleep_preroll_s`, default 3.0 s). When an ambient bed is
+  selected, the orchestrator prepends a silent pre-roll to the mastered narration
+  before mixing, so the ambient bed plays alone for 3 seconds before the first
+  word. Gives listeners a gentle entry rather than an abrupt start. Only applies
+  when an ambient bed is selected; 0 disables.
+
+**Why:** users reported (1) `[pause]` tags not being honoured by ElevenLabs
+(the regex required a numeric duration; bare tags were common in hand-written
+prose) and (2) sleep stories starting too abruptly (narration began on the
+first sample, with no musical lead-in).
+
+---
+
+## 2026-06-20 — ElevenLabs sleep quality: lossless pipeline + anti-drift tagging
+
+**What changed** (sleep stories + ElevenLabs only; podcasts untouched):
+- **Higher-quality intermediate.** `elevenlabs_segment_format` stays at
+  `mp3_44100_192` (the best format the Creator tier offers). Lossless `pcm_44100`
+  is supported by the pipeline (`bytes_to_segment` decodes raw `pcm_*`) but
+  **requires an ElevenLabs Pro plan**, so it's documented as an opt-in rather than
+  the default. Set `ELEVENLABS_SEGMENT_FORMAT=pcm_44100` on Pro for a truly
+  lossless intermediate.
+- **Per-chunk loudness normalization before stitching** (`sleep_chunk_normalize`,
+  default on). New `ffmpeg_stitch.normalize_loudness` normalizes each speech chunk
+  to `sleep_chunk_norm_lufs` (−21 LUFS) before the concat; the −18 LUFS master
+  pass then sets the absolute level. Chunks under `sleep_chunk_norm_min_ms`
+  (400 ms) are skipped. Output rate is re-pinned because `loudnorm` upsamples to
+  192 kHz internally (would otherwise break the concat demuxer).
+- **v3 pacing-tag reassertion** (`elevenlabs_sleep_v3_pacing_tag`, default `""` =
+  off). When set to e.g. `[slowly]`, `_prepare_v3` prepends it after the emotion
+  tag on every sleep chunk so v3 holds its slow, calm register.
+- **Sentence-boundary ellipsis injection** (`sleep_sentence_ellipsis`, default
+  off). `sleep_text.inject_sentence_pauses` adds a soft `…` at sentence breaks.
+
+**Why:** ported from the reference meditation project (`moodscape-mix-lib`),
+which gets noticeably better ElevenLabs output. The base settings already matched
+(v3, stability 0.5, speaker boost); the reference's edge was pipeline hygiene
+(lossless, per-chunk level consistency) and reasserting a pacing tag to stop v3
+drifting toward an audiobook read on long stories.
+
+**Trade-offs / decisions:** the two character-altering knobs (pacing tag,
+ellipsis) ship **defaults-off** so existing renders are byte-identical until opted
+into for A/B. A heavyweight overlapping crossfade was considered and rejected: the
+sleep path already splices real silence between chunks, so seams are mostly
+silence-separated, and a crossfade would fight the constant-memory concat design
+for little gain — the existing 8 ms edge fade is kept.
+
+## 2026-06-20 — F5 performance: the real fix (nfe_step + reference clip)
+
+Sleep stories still took ~53 min for a 10-min render after the MPS/fp16 change
+below. Benchmarking on the host (MPS + fp16) found the actual cost drivers, which
+were **not** device/dtype:
+
+| config (MPS+fp16)            | RTF  |
+|-----------------------------|------|
+| nfe=32, ref 13s (old sleep) | 5.32 |
+| nfe=16, ref 13s             | 2.35 |
+| nfe=12, ref 13s             | 1.75 |
+| nfe=16, ref 6s              | 1.42 |
+| nfe=8,  ref 6s              | 0.69 |
+
+Two roughly-multiplicative levers dominate; device (MPS vs CPU ≈ 1.6x) and dtype
+(fp16 vs fp32 ≈ 8%) are minor by comparison.
+
+**What changed:**
+- **Sleep `f5_sleep_nfe_step` 32 → 16.** F5 runtime scales ~linearly with
+  `nfe_step`; with sway sampling, 16 holds quality (the reference meditation
+  project uses 16 as its working default, 32 only for final renders). ~2x faster.
+- **New `f5_ref_clip_seconds` (default 8.0).** F5 recomputes the *reference +
+  generated* sequence every chunk, so the reference length is a direct per-chunk
+  multiplier. References are clipped to 8s in `_get_reference` **before** Whisper
+  transcription (so the derived `ref_text` still matches the audio — clipping
+  after would reintroduce leakage). New `_clip_audio_file` helper. ~1.6x faster.
+- Combined: a 10-min sleep story now renders at **RTF ~1.5 (~15 min)** vs the
+  previous RTF ~5.3 (~53 min) — measured end-to-end.
+- Fixed a regression from the change below: `_apply_silero_vad` lost its
+  `import torch` when VAD loading was refactored into `_get_vad`, so VAD silently
+  failed on every chunk. Restored.
+
+**Trade-offs:** nfe=16 is marginally lower fidelity than 32 on paper; in practice
+sway sampling makes it indistinguishable for narration, and both remain tunable
+(`F5_SLEEP_NFE_STEP`, `F5_NFE_STEP`). An 8s reference is ample for F5 voice
+cloning; `F5_REF_CLIP_SECONDS=0` disables clipping.
+
+## 2026-06-20 — F5 performance: MPS + float16 + VAD caching
+
+**What changed:**
+- `_resolve_device()` now falls through to MPS on Apple Silicon (was CPU-only for
+  the `auto` path). Measured ~1.6x faster than CPU here (not the 5-10x first
+  assumed — see the entry above for the real cost drivers).
+- float16 is auto-selected when device is MPS. ~8% on top of the MPS win.
+  Explicit `F5_DTYPE=float32` overrides.
+- Silero VAD model is cached at module level (`_vad_cache`) instead of calling
+  `torch.hub.load()` on every chunk.
+- Updated config.py comments and ARCHITECTURE.md.
+
+**Why:** the initial hypothesis was that `auto` resolved to CPU on Apple Silicon.
+That was true and worth fixing, but on this host MPS+fp16 still left RTF ~5.3 at
+the old nfe=32 — unusable. The follow-up entry above is the fix that actually made
+it sustainable.
+
+**Trade-offs:** float16 on MPS was previously avoided over garbled-output
+concerns; it runs cleanly here. `F5_DTYPE=float32` remains an escape hatch.
+
 ## 2026-06-20 — F5 sleep story quality improvement
 
 **What changed:**

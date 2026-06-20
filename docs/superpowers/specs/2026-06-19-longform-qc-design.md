@@ -47,7 +47,7 @@ Surfacing: `QCReport`/`QCWindow` in `models.py`; `GenerateResult.qc` set by
 `orchestrator._attach_qc`, called from `run()` after the master is written when
 `Settings.enable_qc` is true. SIM reference is resolved from
 `reference_voice_registry` for the single-cloned-voice case (sleep stories always;
-podcasts when one distinct f5/cosyvoice voice is used).
+podcasts when one distinct f5 voice is used).
 
 Settings: `enable_qc` (default `False`), `qc_whisper_mlx_repo`,
 `qc_whisper_faster_size`, `qc_sim_threshold`. Deps: `uv sync --extra qc`.

@@ -120,10 +120,11 @@ the engine and stitcher work in one currency:
 
 `output_format` is meaningful to cloud providers (it selects request quality);
 local providers ignore it (they have a fixed native rate). ElevenLabs uses a
-per-provider override (`ELEVENLABS_SEGMENT_FORMAT=pcm_44100` by default) to
-request raw PCM, avoiding double-encode quality loss; `bytes_to_segment`
-handles `pcm_*` formats by constructing the `AudioSegment` from raw 16-bit
-mono samples.
+per-provider override (`ELEVENLABS_SEGMENT_FORMAT`, default `mp3_44100_192` —
+the best format Creator tier offers) to raise the intermediate quality before
+mastering. On a **Pro** plan, set `pcm_44100` for a truly lossless intermediate;
+`bytes_to_segment` handles `pcm_*` formats by constructing the `AudioSegment`
+from raw 16-bit mono samples.
 
 ### Per-job parameters via `voice_settings`
 
@@ -215,19 +216,31 @@ Output 24kHz.
 
 ### F5 (local, voice cloning)
 `f5_tts.api.F5TTS(model="F5TTS_v1_Base", device)`. **Runtime is config-driven**
-(`F5_DEVICE`/`F5_DTYPE`) and defaults to **CPU + float32** — on Apple Silicon,
-float16-on-MPS is the documented cause of garbled output and unsupported
-flow-matching ops bounce to CPU (so MPS is opt-in: set `F5_DEVICE=mps`, which also
-sets `PYTORCH_ENABLE_MPS_FALLBACK=1`). `_resolve_device` honours `cpu`/`mps`/`cuda`
-and `auto` (CUDA if present, else CPU); the CPU path also `set_num_threads`.
-Inference runs under `torch.inference_mode()`. Defaults: `nfe_step=16` (was 32,
-~halves latency), `cfg_strength=2.0`, `sway_coef=-1.0`, and a tighter
-`F5_CHUNK_CHARS=250` to stay well under F5's ~30s/pass garble edge. Each reference
-is preprocessed once with F5's `preprocess_ref_audio_text` (clips to ≤12s) and
-cached. `synthesize` → `model.infer(...)`. Output 24kHz.
+(`F5_DEVICE`/`F5_DTYPE`). `_resolve_device` honours `cpu`/`mps`/`cuda` and
+`auto` (CUDA > MPS > CPU). On Apple Silicon `auto` resolves to **MPS** (~1.6x
+faster than CPU on the host benchmarked); float16 is auto-selected for MPS (~8%
+on top), `F5_DTYPE=float32` overrides. The MPS path sets
+`PYTORCH_ENABLE_MPS_FALLBACK=1`; the CPU path sets `set_num_threads`. Inference
+runs under `torch.inference_mode()`.
 
-`scripts/bench_f5.py` times CPU-fp32 vs MPS-fp32 on the host so the default device
-can be set from whichever wins.
+**Runtime is dominated by two levers, not device/dtype** (measured MPS+fp16, RTF
+= compute-sec ÷ audio-sec):
+- **`nfe_step`** — F5 scales ~linearly with it: nfe=32 → RTF 5.3, nfe=16 → 2.4,
+  nfe=12 → 1.8. Default `F5_NFE_STEP=16` for podcasts; `F5_SLEEP_NFE_STEP=16`
+  (was 32 — that 32 was the cause of the ~53-min 10-min sleep render).
+- **Reference length** — F5 recomputes the *reference + generated* sequence each
+  chunk, so reference duration is a per-chunk multiplier. `F5_REF_CLIP_SECONDS=8`
+  trims the clip in `_get_reference` (`_clip_audio_file`) **before** Whisper
+  transcription, so `ref_text` stays aligned to the audio (clipping after would
+  reintroduce syllable leakage). 0 disables. ~1.6x faster than the ~12s default.
+
+Combined, a 10-min sleep story renders at RTF ~1.5 (~15 min). Other defaults:
+`cfg_strength=2.0`, `sway_coef=-1.0`, and a tight `F5_CHUNK_CHARS=250` (well under
+F5's ~30s/pass garble edge). Each reference is preprocessed once with F5's
+`preprocess_ref_audio_text` and cached. `synthesize` → `model.infer(...)`. 24kHz.
+
+Post-synthesis VAD (Silero) is cached at module level — loaded once on the first
+chunk and reused for all subsequent chunks in the same process.
 
 Voices are discovered from the assets folder (`reference_voice_registry.scan`):
 
@@ -386,7 +399,8 @@ durations configurable via `kokoro_pause_*`) →
 sentence-chunks the prose → synthesizes each chunk with a **per-chunk ramped**
 `speed`/continuity (see below) and a default calm tone (see below) → inserts a
 ramped `pause_ms` silence between sentences and honors author `[pause:N]` breaths
-(see below) → concats to a raw narration WAV → `sleep_post.process` (ffmpeg:
+(see below) → **per-chunk loudness-normalizes** each speech chunk before the
+stitch (see below) → concats to a raw narration WAV → `sleep_post.process` (ffmpeg:
 `acompressor` → `lowpass` → `loudnorm` EBU R128 at −18 LUFS / −2 dBTP → `afade`
 in/out → 44.1 kHz **stereo**) → if an ambient bed is chosen, `ambient.mix` softens
 and floats the bed under the voice (see below) → exports WAV + MP3. None of this
@@ -406,24 +420,50 @@ profile). A **leading author tone tag** that names a known emotion (`[calm] …`
 maps it to a warmer numeric profile — then removed from the text so it is never
 spoken or double-tagged. A leading non-emotion cue (`[sighs]`) stays inline for v3.
 
-**Deliberate breaths (`[pause:N]`).** Authors can place `[pause:800]` /
-`[pause:800ms]` markers. On **ElevenLabs v2** the provider rewrites them to native
-`<break time>` tags (model-aware prosody, capped at the API's 3 s;
-`elevenlabs_v2_native_breaks`). On **v3 and the local engines** (which have no
-break tags) the orchestrator splits the chunk on the marker and splices real
-silence via `sleep_text.split_pauses` (clamped to `sleep_pause_marker_max_ms`).
-These stack on top of the inter-sentence + ramp pauses.
+**Deliberate breaths (`[pause:N]` / `[pause]`).** Authors can place `[pause:800]`,
+`[pause:800ms]`, or bare `[pause]` markers. A bare `[pause]` uses the configured
+default (`sleep_pause_default_ms`, default 1000 ms). On **ElevenLabs v2** the
+provider rewrites them to native `<break time>` tags (model-aware prosody, capped
+at the API's 3 s; `elevenlabs_v2_native_breaks`; bare `[pause]` → 1 s). On **v3
+and the local engines** (which have no break tags) the orchestrator splits the
+chunk on the marker and splices real silence via `sleep_text.split_pauses` (clamped
+to `sleep_pause_marker_max_ms`). These stack on top of the inter-sentence + ramp
+pauses.
 
-**Ambient bed ("light and slow").** `ambient.build_looped_bed` extends the bed to
-the narration length with a **crossfaded seam** (`ambient_loop_crossfade_s`) so
-loop points don't click; `ambient.mix` then **loudness-normalizes** the bed to a
-consistent level (`ambient_bed_target_lufs`, default −24 LUFS) so different ambient
-files sit at the same perceived volume regardless of source level, **band-limits**
-it (`ambient_bed_highpass_hz` / `ambient_bed_lowpass_hz`) so it sits dark and soft
-behind the voice, pulls it ~18 dB under (`ambient_bed_gain_db`), fades it, and —
-when `ambient_duck` is on — **sidechain-ducks** it under the voice
-(`sidechaincompress` keyed off the narration) so it dips while the narrator speaks
-and breathes back up in the gaps.
+**Ambient bed ("light and slow").** When an ambient bed is selected, the
+orchestrator prepends a **silent pre-roll** (`sleep_preroll_s`, default 3 s) to
+the mastered narration so the bed plays alone before the first word — giving
+listeners a gentle entry instead of an abrupt start. `ambient.build_looped_bed`
+extends the bed to the full length (pre-roll + narration) with a **crossfaded
+seam** (`ambient_loop_crossfade_s`) so loop points don't click; `ambient.mix` then
+**loudness-normalizes** the bed to a consistent level (`ambient_bed_target_lufs`,
+default −24 LUFS) so different ambient files sit at the same perceived volume
+regardless of source level, **band-limits** it (`ambient_bed_highpass_hz` /
+`ambient_bed_lowpass_hz`) so it sits dark and soft behind the voice, pulls it ~18
+dB under (`ambient_bed_gain_db`), fades it, and — when `ambient_duck` is on —
+**sidechain-ducks** it under the voice (`sidechaincompress` keyed off the
+narration) so it dips while the narrator speaks and breathes back up in the gaps.
+
+**Per-chunk loudness normalization** (`sleep_chunk_normalize`, default on).
+ElevenLabs v3 drifts in loudness from chunk to chunk under any settings, and a
+single end-of-pipeline `loudnorm` can't undo level jumps already baked into the
+stitched track. So each speech chunk is normalized to a common target
+(`ffmpeg_stitch.normalize_loudness`, `sleep_chunk_norm_lufs`, default −21 LUFS,
+which sits above the −18 LUFS master so the master pass doesn't fight it) *before*
+the concat; the master then only sets the absolute level. Chunks shorter than
+`sleep_chunk_norm_min_ms` (400 ms) are skipped so near-silent fragments aren't
+amplified. `loudnorm` upsamples internally, so the chunk is re-pinned to the sleep
+sample rate to keep concat stream params identical.
+
+**Anti-drift tagging (ElevenLabs v3, both opt-in).** Two knobs counter v3's
+tendency to slide from a calm bedtime register toward an "audiobook narrator"
+read over a long story. **`elevenlabs_sleep_v3_pacing_tag`** (empty = off) is a
+pacing tag (e.g. `[slowly]`) *reasserted on every chunk* by `_prepare_v3`,
+landing after the emotion tag (`[calm] [slowly] …`). **`sleep_sentence_ellipsis`**
+(default off) runs `sleep_text.inject_sentence_pauses` before chunking to add a
+soft `…` breathing pause at sentence breaks that lack one (honored by v2 and v3,
+never inserted inside a `[…]` cue). Both are ElevenLabs-sleep only and ship
+defaults-off so existing renders are unchanged until enabled.
 
 **Progressive ramp-down** (`SleepStoryRequest.ramp`, default on, `_sleep_ramp`):
 per chunk, `speed` eases linearly from the baseline to
