@@ -112,9 +112,6 @@ class SleepStoryRequest(BaseModel):
     # lengthen across the story (toward sleep onset). On by default; False holds a
     # single fixed speed/pause for the whole narration.
     ramp: bool = True
-    # Delivery directive for instruct-capable providers (CosyVoice3 Instruct
-    # Mode), e.g. "Speak very slowly and softly". Overrides the configured sleep
-    # default; ignored by providers that don't accept instructions.
     style_prompt: str | None = None
     # Optional deterministic seed forwarded to ElevenLabs for reproducible
     # re-renders. None lets the model sample freely.
@@ -252,7 +249,7 @@ class ReferenceVoiceCreated(BaseModel):
 
     id: str  # slug, the registry key + voice_id
     name: str  # display name
-    providers: list[str]  # cloning providers that can now use it (f5, cosyvoice)
+    providers: list[str]  # cloning providers that can now use it (f5)
     transcript: str  # the transcript stored alongside the clip
     replaced: bool = False  # True if an existing voice with this slug was overwritten
     notes: list[str] = Field(default_factory=list)  # hygiene steps applied / skipped

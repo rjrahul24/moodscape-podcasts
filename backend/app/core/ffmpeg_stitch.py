@@ -63,6 +63,39 @@ def segment_to_wav_file(
     return path
 
 
+def normalize_loudness(
+    in_wav: Path,
+    out_wav: Path,
+    *,
+    target_lufs: float,
+    sample_rate: int,
+    true_peak_db: float = -1.5,
+) -> Path:
+    """Loudness-normalize ``in_wav`` → ``out_wav`` (single-pass EBU R128).
+
+    Used to even out a TTS engine's chunk-to-chunk loudness drift *before* the
+    chunks are stitched, so the inter-chunk level is consistent and a later
+    master pass (``sleep_post``) only has to set the absolute target. A single
+    ``loudnorm`` pass is enough here — the goal is relative consistency across
+    chunks, not a precise final number.
+
+    ``loudnorm`` internally upsamples to 192 kHz, so the output is re-pinned to
+    ``sample_rate`` (via ``-ar``) to keep every chunk's stream params identical
+    for the concat demuxer.
+    """
+    af = f"loudnorm=I={target_lufs}:TP={true_peak_db}:LRA=11"
+    run_ffmpeg(
+        [
+            "-i", str(in_wav.resolve()),
+            "-af", af,
+            "-ar", str(int(sample_rate)),
+            "-c:a", "pcm_s16le",
+            str(out_wav.resolve()),
+        ]
+    )
+    return out_wav
+
+
 def silence_wav(
     path: Path,
     *,

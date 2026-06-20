@@ -38,12 +38,6 @@ class TTSProvider(ABC):
     #: model-native control, not a resampling/rate multiplier we apply ourselves.
     has_native_speed: bool = False
 
-    #: Provider accepts a natural-language ``instruct`` directive in
-    #: voice_settings that drives delivery/prosody independently of the voice
-    #: (CosyVoice3 Instruct Mode). The sleep path uses it to enforce a calm,
-    #: hypnotic pace decoupled from the cloned reference clip's energy.
-    accepts_instruct: bool = False
-
     #: Provider can *perform* inline breath/SFX tags (e.g. ``[deep_breath]``)
     #: rather than speaking them literally. When True the text processor leaves
     #: those tags in the chunk text; when False (every current provider) they are

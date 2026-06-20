@@ -22,7 +22,7 @@ from app.providers import reference_voice_registry, registry
 router = APIRouter()
 
 # Cloning providers that read the shared reference-voice registry.
-_CLONE_PROVIDERS = ("f5", "cosyvoice")
+_CLONE_PROVIDERS = ("f5",)
 
 
 def _elevenlabs_voices(settings, provider) -> list[Voice]:
@@ -77,8 +77,8 @@ async def add_reference_voice(
     """Upload + clean a short clip into the shared reference-voice registry.
 
     The clip is downmixed, resampled, silence-trimmed, optionally denoised, and
-    length-capped, then persisted to ``assets/speakers/`` so F5 and CosyVoice3
-    can clone from it. A transcript is required (the cloners condition on it); if
+    length-capped, then persisted to ``assets/speakers/`` so F5 can clone from
+    it. A transcript is required (the cloners condition on it); if
     none is supplied we try local Whisper (the QC extra) and fail with a clear
     message if that isn't available.
     """

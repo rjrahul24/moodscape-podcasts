@@ -1,7 +1,6 @@
 """Discover reference voices (clone targets) from the assets folder.
 
-Shared by every local provider that clones from a short reference clip — F5 and
-CosyVoice3 both read the same audio + transcript pairs.
+Used by local providers that clone from a short reference clip (F5).
 
 Layout (mirrors the source meditation project):
 
@@ -41,8 +40,8 @@ def save(
 
     Copies ``audio_src`` to ``reference_audio/<slug>.wav`` and writes
     ``transcript`` to ``reference_text/<slug>.txt`` (creating the dirs). Overwrites
-    an existing voice with the same slug. Returns the written paths. F5 and
-    CosyVoice3 pick it up automatically on the next ``scan``.
+    an existing voice with the same slug. Returns the written paths. F5 picks
+    it up automatically on the next ``scan``.
     """
     audio_dir, text_dir = _dirs(assets_dir)
     audio_dir.mkdir(parents=True, exist_ok=True)

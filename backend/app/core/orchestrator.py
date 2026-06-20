@@ -779,6 +779,10 @@ def _run_sleep(
     # clipped, transactional tone (the provider's apply_text_normalization handles
     # the rest server-side).
     prose = sleep_text.spell_numbers(request.prose_text)
+    # Soft breathing pause at each sentence break (ElevenLabs honours "…" on both
+    # v2 and v3). Opt-in; applied before chunking so it rides into every chunk.
+    if provider_name == "elevenlabs" and settings.sleep_sentence_ellipsis:
+        prose = sleep_text.inject_sentence_pauses(prose)
     if provider_name == "kokoro":
         prose = sleep_text.punctuation_to_pauses(
             prose,
@@ -837,7 +841,9 @@ def _run_sleep(
             pieces = [(chunk.text, 0)]
         else:
             pieces = sleep_text.split_pauses(
-                chunk.text, max_ms=settings.sleep_pause_marker_max_ms
+                chunk.text,
+                max_ms=settings.sleep_pause_marker_max_ms,
+                default_ms=settings.sleep_pause_default_ms,
             )
 
         for j, (piece_text, pause_after_ms) in enumerate(pieces):
@@ -860,7 +866,22 @@ def _run_sleep(
                     seg, chunk_path, sample_rate=rate, channels=1,
                     edge_fade_ms=settings.chunk_edge_fade_ms,
                 )
-                concat_paths.append(chunk_path)
+                # Even out the engine's chunk-to-chunk loudness drift before the
+                # stitch (the final master only sets the absolute level). Skip
+                # very short chunks so near-silent fragments aren't amplified.
+                if (
+                    settings.sleep_chunk_normalize
+                    and len(seg) >= settings.sleep_chunk_norm_min_ms
+                ):
+                    norm_path = work_dir / f"chunk_{seg_counter:05d}.norm.wav"
+                    ffmpeg_stitch.normalize_loudness(
+                        chunk_path, norm_path,
+                        target_lufs=settings.sleep_chunk_norm_lufs,
+                        sample_rate=rate,
+                    )
+                    concat_paths.append(norm_path)
+                else:
+                    concat_paths.append(chunk_path)
                 narration_ms += len(seg)
                 seg_counter += 1
             _splice_silence(pause_after_ms)  # the author's deliberate breath
@@ -875,6 +896,22 @@ def _run_sleep(
     processed = sleep_post.process(
         narration, work_dir / "processed.wav", settings=settings, total_ms=narration_ms
     )
+
+    # Prepend a silent pre-roll so the ambient bed plays alone before the
+    # narration starts — gives listeners a gentle entry instead of an abrupt
+    # first word. Only when an ambient bed is selected.
+    if bed_path is not None and settings.sleep_preroll_s > 0:
+        preroll_ms = int(settings.sleep_preroll_s * 1000)
+        preroll_path = work_dir / "preroll.wav"
+        ffmpeg_stitch.silence_wav(
+            preroll_path, duration_ms=preroll_ms,
+            sample_rate=rate, channels=settings.sleep_channels,
+        )
+        preroll_list = ffmpeg_stitch.build_concat_list(
+            [preroll_path, processed], work_dir / "preroll_list.txt",
+        )
+        processed = ffmpeg_stitch.concat(preroll_list, work_dir / "with_preroll.wav")
+        narration_ms += preroll_ms
 
     if bed_path is not None:
         report(step="Mixing ambient bed", chunks_done=total, chunks_total=total)
