@@ -53,6 +53,15 @@ class Settings(BaseSettings):
     # Server-side text normalization ("auto"|"on"|"off"): spells numbers/symbols
     # so the model never reads digits in a clipped, transactional tone.
     elevenlabs_text_normalization: str = "auto"
+    # v3 sleep stability (discrete: 0.0 Creative / 0.5 Natural / 1.0 Robust).
+    # Natural (0.5) keeps the inline calming tags ([calm], [warmly]) *responsive*
+    # while staying steady — Robust (1.0) is more consistent but largely ignores
+    # the tags, defeating the reason to run v3 for an expressive-but-calm read.
+    elevenlabs_sleep_v3_stability: float = 0.5
+    # On v2, translate author-placed [pause:N] markers into native <break time>
+    # tags so ElevenLabs renders the breath with model-aware prosody (smoother
+    # than a spliced silence). v3 has no break tags, so it always splices.
+    elevenlabs_v2_native_breaks: bool = True
     # Per-provider intermediate format: higher bitrate than the global default
     # reduces quality loss when chunks are decoded then re-encoded for the final
     # master. pcm_44100 is ideal but requires ElevenLabs Pro; mp3_44100_192 is
@@ -61,11 +70,6 @@ class Settings(BaseSettings):
 
     # Providers
     default_provider: str = "elevenlabs"
-    # Pre-compile Metal/model kernels at startup with a silent dummy synthesis so
-    # the first real generate doesn't pay the ~5x JIT penalty. Off by default
-    # (adds boot latency + needs the heavy ML libs installed); turn on for a
-    # long-running local instance. Best-effort — failures are logged, not fatal.
-    warmup_providers: bool = False
 
     # Audio
     segment_output_format: str = "mp3_44100_128"
@@ -91,7 +95,7 @@ class Settings(BaseSettings):
     # without overlapping audio (the memory-safe stand-in for a crossfade). 0 = off.
     chunk_edge_fade_ms: int = 8
 
-    # Local models — reference voice assets (F5, CosyVoice3)
+    # Local models — reference voice assets (F5)
     assets_dir: Path = _DEFAULT_ASSETS_DIR
     # Uploaded reference clips are cleaned (mono, resample, silence-trim, optional
     # denoise) before they enter the registry. Cloners need only a short window.
@@ -100,6 +104,13 @@ class Settings(BaseSettings):
 
     # Kokoro
     kokoro_speed: float = 1.0
+    # Kokoro ignores punctuation for pausing — the app converts commas, ellipses,
+    # semicolons, and dashes to explicit [pause:N] markers (sleep stories only).
+    kokoro_pause_comma_ms: int = 80
+    kokoro_pause_ellipsis_ms: int = 350
+    kokoro_pause_semicolon_ms: int = 200
+    kokoro_pause_dash_ms: int = 250
+    kokoro_pause_paragraph_ms: int = 400
 
     # F5. On Apple Silicon, float16-on-MPS is the documented cause of garbled
     # output and MPS-unsupported ops bounce to CPU — so the default runtime is
@@ -113,32 +124,33 @@ class Settings(BaseSettings):
     f5_nfe_step: int = 16
     f5_cfg_strength: float = 2.0
     f5_sway_coef: float = -1.0
-
-    # CosyVoice3 (MLX) — Apple-Silicon sleep-story provider. Instruct Mode
-    # decouples the cloned timbre from delivery: ``cosyvoice_sleep_instruct``
-    # drives a calm, hypnotic pace independent of the reference clip's energy
-    # (injected by the orchestrator for sleep stories; per-story overridable via
-    # SleepStoryRequest.style_prompt). Apple Silicon only; `uv sync --extra mlx`.
-    cosyvoice_model: str = "mlx-community/Fun-CosyVoice3-0.5B-2512-4bit"
-    cosyvoice_sleep_instruct: str = (
-        "Speak softly, gently, and very slowly, with a calm, soothing, hypnotic rhythm."
-    )
-    # Cap MLX's Metal buffer cache (MB). Over a 30–90 min job the cache balloons
-    # and tips into SSD swap, collapsing throughput to single-digit tok/s. 0 keeps
-    # MLX's own default (no cap). A value like 1024 holds peak memory steady.
-    mlx_cache_mb: int = 0
+    # F5 sleep story overrides. Sleep stories prioritize quality over speed, so
+    # nfe_step defaults higher (32 vs 16 for podcasts) and speed starts at a
+    # calm meditation pace (~95-100 WPM) before the ramp eases it further.
+    f5_sleep_nfe_step: int = 32
+    f5_sleep_speed: float = 0.88
 
     # Per-provider chunk budgets (characters). Long text is split into bounded
     # chunks before synthesis so Kokoro stays under its 510 phoneme-token cap and
     # F5 stays within ~30s/pass. See core/chunker.py for the char-vs-token note.
     kokoro_chunk_chars: int = 400
     f5_chunk_chars: int = 250  # ~18s/pass: well under F5's ~30s garble edge
-    cosyvoice_chunk_chars: int = 300  # keep chunks under CosyVoice3's ~30s ref window
     elevenlabs_chunk_chars: int = 1000
 
     # Sleep stories (single-speaker, calming treatment — NOT applied to podcasts).
-    sleep_default_speed: float = 0.85
-    sleep_default_pause_ms: int = 900  # inter-sentence silence
+    # Base pace sits low (ElevenLabs honours 0.7–1.2; 0.7 is the slowest). Sleep
+    # wants an unhurried read, so the default leans toward that floor and the
+    # ramp eases it further. The UI Speed slider overrides per story.
+    sleep_default_speed: float = 0.78
+    sleep_default_pause_ms: int = 1050  # inter-sentence silence
+    # Default delivery tone injected for ElevenLabs sleep chunks that don't open
+    # with an author-placed tag, so even untagged prose lands in a calm register
+    # (v3 prepends the mapped inline tag; v2 uses the matching numeric profile).
+    # Empty string disables the injection.
+    sleep_default_tone: str = "soothing"
+    # Author-placed [pause:N] breaths are clamped to this ceiling (ms) on every
+    # engine (the v2 native <break> tag is additionally clamped to 3 s by the API).
+    sleep_pause_marker_max_ms: int = 5000
     sleep_sample_rate: int = 44100
     sleep_channels: int = 2  # sleep masters are stereo
     sleep_target_lufs: float = -18.0  # EBU R128 integrated loudness target (calm but audible)
@@ -152,7 +164,21 @@ class Settings(BaseSettings):
     # story. Gated per request by SleepStoryRequest.ramp (default on).
     sleep_ramp_speed_end_factor: float = 0.94  # ~6% slower by the final chunk
     sleep_ramp_pause_scale: float = 1.6  # final pauses ~60% longer than the first
-    ambient_bed_gain_db: float = -22.0  # how far under the narration the bed sits
+    # Ambient bed ("light and slow" music under the narration). The bed is
+    # band-limited so it sits softly *behind* the voice, looped with a crossfaded
+    # seam (no click), pulled well under the voice, and — when ducking is on —
+    # gently dips while the narrator speaks and breathes back up in the gaps.
+    ambient_bed_target_lufs: float = -24.0  # normalize bed loudness before gain
+    ambient_bed_gain_db: float = -18.0  # under the voice but audibly present
+    ambient_bed_lowpass_hz: int = 3000  # dark, unobtrusive top end
+    ambient_bed_highpass_hz: int = 90  # clear low mud that would fight the voice
+    ambient_loop_crossfade_s: float = 2.0  # seam crossfade when looping the bed
+    ambient_duck: bool = True  # sidechain-duck the bed under the voice
+    # Gentle duck: sleep narration is near-continuous, so a hard duck would keep
+    # the bed inaudible the whole story. A low ratio just nudges it under speech.
+    ambient_duck_ratio: float = 2.0  # gentle compression ratio for the duck
+    ambient_duck_threshold_db: float = -28.0  # voice level that triggers the duck
+    ambient_duck_release_ms: int = 600  # how slowly the bed recovers after speech
     ambient_dir: Path = _DEFAULT_ASSETS_DIR / "ambient"
     series_dir: Path = _DEFAULT_ASSETS_DIR / "series"
     podcast_music_dir: Path = _DEFAULT_ASSETS_DIR / "podcast_music"
