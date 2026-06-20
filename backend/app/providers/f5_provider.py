@@ -56,6 +56,24 @@ def _trim_trailing_silence(audio: np.ndarray, sr: int) -> np.ndarray:
 # ── Silero VAD ───────────────────────────────────────────────────────────────
 _VAD_GAIN_FLOOR = 0.15
 _VAD_CROP_TAIL_MS = 100.0
+_vad_cache: tuple | None = None
+
+
+def _get_vad():
+    """Load Silero VAD once and cache for reuse across chunks."""
+    global _vad_cache
+    if _vad_cache is not None:
+        return _vad_cache
+    import torch
+
+    model, utils = torch.hub.load(
+        repo_or_dir="snakers4/silero-vad",
+        model="silero_vad",
+        force_reload=False,
+        trust_repo=True,
+    )
+    _vad_cache = (model, utils)
+    return _vad_cache
 
 
 def _apply_silero_vad(audio: np.ndarray, sr: int) -> np.ndarray:
@@ -69,12 +87,7 @@ def _apply_silero_vad(audio: np.ndarray, sr: int) -> np.ndarray:
         import torch
         import torchaudio
 
-        model, utils = torch.hub.load(
-            repo_or_dir="snakers4/silero-vad",
-            model="silero_vad",
-            force_reload=False,
-            trust_repo=True,
-        )
+        model, utils = _get_vad()
         (get_speech_timestamps, _, _, _, _) = utils
 
         vad_sr = 16000
@@ -118,6 +131,31 @@ def _apply_silero_vad(audio: np.ndarray, sr: int) -> np.ndarray:
 
 # ── Reference audio conditioning ─────────────────────────────────────────────
 _REF_TARGET_DBFS = -20.0
+
+
+def _clip_audio_file(audio_path: str, clip_seconds: float) -> str:
+    """Trim an audio file to ``clip_seconds`` and return a temp WAV path.
+
+    F5 recomputes the whole reference+generated sequence every chunk, so the
+    reference length is a direct per-chunk runtime multiplier. A few seconds is
+    plenty to clone a voice. Clipping happens *before* Whisper transcription so
+    the derived ref_text matches the (shorter) audio exactly — otherwise the
+    transcript would describe words no longer present, reintroducing leakage.
+    Returns the original path unchanged if it's already within the limit.
+    """
+    import soundfile as sf
+
+    audio, file_sr = sf.read(audio_path, dtype="float32")
+    if audio.ndim > 1:
+        audio = audio.mean(axis=1)
+    max_samples = int(clip_seconds * file_sr)
+    if len(audio) <= max_samples:
+        return audio_path
+    audio = audio[:max_samples]
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix="_clip.wav")
+    tmp.close()
+    sf.write(tmp.name, audio.astype(np.float32), file_sr, subtype="PCM_16")
+    return tmp.name
 
 
 def _condition_reference_audio(audio_path: str) -> str:
@@ -171,6 +209,7 @@ class F5Provider(TTSProvider):
         nfe_step: int = 16,
         cfg_strength: float = 2.0,
         sway_coef: float = -1.0,
+        ref_clip_seconds: float = 0.0,
     ):
         self._assets_dir = Path(assets_dir)
         self._speed = speed
@@ -179,6 +218,7 @@ class F5Provider(TTSProvider):
         self._nfe_step = nfe_step
         self._cfg_strength = cfg_strength
         self._sway_coef = sway_coef
+        self._ref_clip_seconds = ref_clip_seconds
         self._model = None
         self._ref_cache: dict[str, dict] = {}
 
@@ -256,12 +296,16 @@ class F5Provider(TTSProvider):
             ) from exc
 
         device = self._resolve_device(torch)
+        dtype = self._dtype
+        if device == "mps" and dtype == "float32":
+            dtype = "float16"
+            logger.info("Auto-selecting float16 for MPS device")
         if device == "mps":
             os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
-        logger.info("Loading F5TTS (F5TTS_v1_Base) on %s (%s)", device, self._dtype)
+        logger.info("Loading F5TTS (F5TTS_v1_Base) on %s (%s)", device, dtype)
         try:
             model = F5TTS(model="F5TTS_v1_Base", device=device)
-            if self._dtype == "float16":
+            if dtype == "float16":
                 model.ema_model.to(torch.float16)
         except Exception as exc:  # noqa: BLE001
             raise ProviderError(self.name, f"failed to load F5 model: {exc}") from exc
@@ -283,8 +327,11 @@ class F5Provider(TTSProvider):
             return "cuda" if torch.cuda.is_available() else "cpu"
         if pref == "mps":
             return "mps" if torch.backends.mps.is_available() else "cpu"
+        # auto: CUDA > MPS > CPU
         if torch.cuda.is_available():
             return "cuda"
+        if torch.backends.mps.is_available():
+            return "mps"
         return "cpu"
 
     def _get_reference(self, slug: str) -> dict:
@@ -301,6 +348,11 @@ class F5Provider(TTSProvider):
             )
 
         ref_audio = str(registry[slug]["audio"])
+
+        # Clip the reference *before* Whisper so the transcript matches the
+        # shorter audio. This is the dominant per-chunk F5 runtime multiplier.
+        if self._ref_clip_seconds and self._ref_clip_seconds > 0:
+            ref_audio = _clip_audio_file(ref_audio, self._ref_clip_seconds)
 
         try:
             from f5_tts.infer.utils_infer import preprocess_ref_audio_text

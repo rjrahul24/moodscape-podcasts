@@ -155,6 +155,35 @@ def test_apply_silero_vad_graceful_fallback():
     assert len(result) > 0  # got something back (original or processed)
 
 
+def test_clip_audio_file_trims_long_reference(tmp_path):
+    """A reference longer than the limit is trimmed to ~clip_seconds."""
+    import soundfile as sf
+
+    from app.providers.f5_provider import _clip_audio_file
+
+    long_ref = tmp_path / "long.wav"
+    sr = 24000
+    sf.write(str(long_ref), np.random.randn(sr * 13).astype(np.float32) * 0.1, sr)
+
+    clipped = _clip_audio_file(str(long_ref), 8.0)
+    assert clipped != str(long_ref)  # a new temp file was written
+    audio, out_sr = sf.read(clipped, dtype="float32")
+    assert abs(len(audio) / out_sr - 8.0) < 0.05
+
+
+def test_clip_audio_file_passthrough_when_short(tmp_path):
+    """A reference already within the limit is returned unchanged."""
+    import soundfile as sf
+
+    from app.providers.f5_provider import _clip_audio_file
+
+    short_ref = tmp_path / "short.wav"
+    sr = 24000
+    sf.write(str(short_ref), np.random.randn(sr * 5).astype(np.float32) * 0.1, sr)
+
+    assert _clip_audio_file(str(short_ref), 8.0) == str(short_ref)
+
+
 def test_synthesize_reads_nfe_step_from_voice_settings(tmp_path, fake_f5):
     """voice_settings['nfe_step'] should override the constructor default."""
     _make_voice(tmp_path, "brittney", text="reference transcript")
