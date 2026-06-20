@@ -4,14 +4,18 @@ Voices come from reference ``.wav`` + ``.txt`` pairs under the assets folder
 (see ``f5_voice_registry``). Heavy imports (``f5_tts``, ``torch``) happen lazily
 inside ``synthesize``; ``list_voices`` only scans the filesystem.
 
-Core path only — none of the meditation project's conditioning/VAD/microprosody
-is copied. Reference preprocessing uses F5's own ``preprocess_ref_audio_text``.
+Key quality features ported from the meditation reference project:
+- Reference audio conditioning (RMS normalization + trailing noise pad)
+- Whisper-verified ref_text (pass empty string to preprocess_ref_audio_text)
+- Post-synthesis silence trimming + Silero VAD
+- Short-phrase speed override for tiny fragments
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -28,6 +32,129 @@ from .base import TTSProvider
 logger = logging.getLogger("moodscape")
 
 SAMPLE_RATE = 24000  # F5 (Vocos vocoder) outputs 24 kHz
+
+# ── Trailing-silence trimmer ─────────────────────────────────────────────────
+_TRIM_THRESHOLD_DB = -45.0
+_TRIM_TAIL_MS = 50.0
+
+
+def _trim_trailing_silence(audio: np.ndarray, sr: int) -> np.ndarray:
+    """Remove trailing silence from an F5-TTS speech chunk.
+
+    Finds the last sample whose absolute amplitude exceeds _TRIM_THRESHOLD_DB,
+    then retains a _TRIM_TAIL_MS decay tail.
+    """
+    threshold = 10 ** (_TRIM_THRESHOLD_DB / 20.0)
+    active = np.where(np.abs(audio) > threshold)[0]
+    if len(active) == 0:
+        return audio
+    tail = int(_TRIM_TAIL_MS / 1000.0 * sr)
+    cut = min(int(active[-1]) + tail + 1, len(audio))
+    return audio[:cut]
+
+
+# ── Silero VAD ───────────────────────────────────────────────────────────────
+_VAD_GAIN_FLOOR = 0.15
+_VAD_CROP_TAIL_MS = 100.0
+
+
+def _apply_silero_vad(audio: np.ndarray, sr: int) -> np.ndarray:
+    """Crop trailing non-speech and attenuate interior gaps via Silero VAD.
+
+    Two-pass: (1) crop after last speech endpoint + safety tail,
+    (2) attenuate interior non-speech to 15% with gaussian-smoothed envelope.
+    Falls back to the original audio if Silero fails.
+    """
+    try:
+        import torch
+        import torchaudio
+
+        model, utils = torch.hub.load(
+            repo_or_dir="snakers4/silero-vad",
+            model="silero_vad",
+            force_reload=False,
+            trust_repo=True,
+        )
+        (get_speech_timestamps, _, _, _, _) = utils
+
+        vad_sr = 16000
+        audio_torch = torch.from_numpy(audio.astype(np.float32)).unsqueeze(0)
+        audio_16k = torchaudio.functional.resample(audio_torch, sr, vad_sr).squeeze(0)
+        scale = sr / vad_sr
+
+        speech_timestamps = get_speech_timestamps(audio_16k, model, sampling_rate=vad_sr)
+        speech_timestamps = [
+            {"start": int(ts["start"] * scale), "end": int(ts["end"] * scale)}
+            for ts in speech_timestamps
+        ]
+
+        if not speech_timestamps:
+            return audio
+
+        # Pass 1: Crop trailing non-speech
+        last_speech_end = speech_timestamps[-1]["end"]
+        crop_tail = int(_VAD_CROP_TAIL_MS / 1000.0 * sr)
+        crop_idx = min(last_speech_end + crop_tail, len(audio))
+        audio = audio[:crop_idx]
+
+        # Pass 2: Attenuate interior non-speech
+        mask = np.full(len(audio), _VAD_GAIN_FLOOR, dtype=np.float64)
+        fade_samples = int(0.05 * sr)
+
+        for ts in speech_timestamps:
+            start, end = ts["start"], min(ts["end"], len(audio))
+            s = max(0, start - fade_samples)
+            e = min(len(mask), end + fade_samples)
+            mask[s:e] = 1.0
+
+        from scipy.ndimage import gaussian_filter1d
+
+        mask = gaussian_filter1d(mask, sigma=fade_samples / 4.0)
+        return (audio * mask).astype(np.float32)
+    except Exception as exc:
+        logger.warning("Silero VAD failed, using trimmed audio: %s", exc)
+        return audio
+
+
+# ── Reference audio conditioning ─────────────────────────────────────────────
+_REF_TARGET_DBFS = -20.0
+
+
+def _condition_reference_audio(audio_path: str, sr: int) -> str:
+    """Condition reference audio: RMS-normalize + append trailing noise pad.
+
+    The trailing noise (~1s at -55 dBFS) prevents F5's duration heuristic from
+    leaking stray reference syllables into short generations.
+    Returns a temp WAV path with conditioned audio.
+    """
+    import soundfile as sf
+
+    audio, file_sr = sf.read(audio_path, dtype="float32")
+    if audio.ndim > 1:
+        audio = audio.mean(axis=1)
+
+    # RMS normalize
+    preserve = os.environ.get("MOODSCAPE_F5_REF_PRESERVE_DYNAMICS", "0") == "1"
+    rms = float(np.sqrt(np.mean(audio**2)))
+    if rms > 1e-8 and not preserve:
+        target_rms = 10 ** (_REF_TARGET_DBFS / 20.0)
+        audio = audio * (target_rms / rms)
+
+    # Trailing noise pad
+    if os.environ.get("MOODSCAPE_F5_REF_PAD", "1") == "1":
+        pad_sec = float(os.environ.get("MOODSCAPE_F5_REF_PAD_SEC", "1.0"))
+        pad_dbfs = float(os.environ.get("MOODSCAPE_F5_REF_PAD_DBFS", "-55.0"))
+        n_pad = int(pad_sec * file_sr)
+        if n_pad > 0:
+            pad_rms = 10 ** (pad_dbfs / 20.0)
+            tail = np.random.randn(n_pad).astype(np.float32) * pad_rms
+            audio = np.concatenate([audio.astype(np.float32), tail])
+
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix="_conditioned.wav")
+    tmp.close()
+    sf.write(tmp.name, audio.astype(np.float32), file_sr, subtype="PCM_16")
+    logger.debug("Conditioned reference audio: RMS->%.1f dBFS -> %s", _REF_TARGET_DBFS, tmp.name)
+    return tmp.name
 
 
 class F5Provider(TTSProvider):
@@ -53,10 +180,9 @@ class F5Provider(TTSProvider):
         self._cfg_strength = cfg_strength
         self._sway_coef = sway_coef
         self._model = None
-        # slug -> {"audio": processed_path, "text": transcript}
         self._ref_cache: dict[str, dict] = {}
 
-    # ── interface ─────────────────────────────────────────────────────────────
+    # -- interface -------------------------------------------------------------
     def list_voices(self) -> list[Voice]:
         registry = reference_voice_registry.scan(self._assets_dir)
         return [
@@ -75,11 +201,20 @@ class F5Provider(TTSProvider):
         model = self._get_model()
         ref = self._get_reference(voice_id)
 
-        # Per-job speed rides voice_settings (sleep stories); default otherwise.
-        # A podcast tone tag (``emotion``) nudges the rate on top of that.
         settings = voice_settings or {}
         speed = settings.get("speed", self._speed)
         speed *= emotion_map.speed_multiplier(settings.get("emotion"))
+
+        # Short-phrase pacing: slow down tiny fragments to prevent ref leakage
+        gen_text = " ".join(text.split())
+        if os.environ.get("MOODSCAPE_F5_SHORT_PHRASE_PACING", "1") == "1":
+            max_chars = int(os.environ.get("MOODSCAPE_F5_SHORT_PHRASE_MAX_CHARS", "12"))
+            if len(gen_text.replace(" ", "")) <= max_chars:
+                speed = float(os.environ.get("MOODSCAPE_F5_SHORT_PHRASE_SPEED", "0.5"))
+
+        # Per-call nfe_step override (sleep stories use 32)
+        nfe_step = settings.get("nfe_step", self._nfe_step)
+
         try:
             import torch
 
@@ -87,9 +222,9 @@ class F5Provider(TTSProvider):
                 wav, _sr, _ = model.infer(
                     ref_file=ref["audio"],
                     ref_text=ref["text"],
-                    gen_text=" ".join(text.split()),
+                    gen_text=gen_text,
                     speed=speed,
-                    nfe_step=self._nfe_step,
+                    nfe_step=nfe_step,
                     cfg_strength=self._cfg_strength,
                     sway_sampling_coef=self._sway_coef,
                     remove_silence=False,
@@ -98,9 +233,15 @@ class F5Provider(TTSProvider):
             raise ProviderError(self.name, f"synthesis failed: {exc}") from exc
 
         arr = wav.detach().cpu().numpy() if hasattr(wav, "detach") else np.asarray(wav)
-        return numpy_to_segment(arr.astype(np.float32).squeeze(), SAMPLE_RATE)
+        arr = arr.astype(np.float32).squeeze()
 
-    # ── lazy model + reference loading ────────────────────────────────────────
+        # Post-processing: trim trailing silence, then VAD
+        arr = _trim_trailing_silence(arr, SAMPLE_RATE)
+        arr = _apply_silero_vad(arr, SAMPLE_RATE)
+
+        return numpy_to_segment(arr, SAMPLE_RATE)
+
+    # -- lazy model + reference loading ----------------------------------------
     def _get_model(self):
         if self._model is not None:
             return self._model
@@ -116,16 +257,10 @@ class F5Provider(TTSProvider):
 
         device = self._resolve_device(torch)
         if device == "mps":
-            # Several flow-matching ops aren't implemented on MPS; let them fall
-            # back to CPU instead of erroring mid-inference.
             os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
-        logger.info(
-            "Loading F5TTS (F5TTS_v1_Base) on %s (%s)", device, self._dtype
-        )
+        logger.info("Loading F5TTS (F5TTS_v1_Base) on %s (%s)", device, self._dtype)
         try:
             model = F5TTS(model="F5TTS_v1_Base", device=device)
-            # Default float32: float16 on MPS is the documented cause of garbled
-            # output on Apple Silicon. Only cast to fp16 when explicitly asked.
             if self._dtype == "float16":
                 model.ema_model.to(torch.float16)
         except Exception as exc:  # noqa: BLE001
@@ -141,13 +276,6 @@ class F5Provider(TTSProvider):
         return model
 
     def _resolve_device(self, torch) -> str:
-        """Pick the inference device from config.
-
-        ``cpu``/``mps``/``cuda`` are honoured directly (``mps`` falls back to CPU
-        if unavailable). ``auto`` prefers CUDA, else CPU — on Apple Silicon CPU +
-        float32 is the reliable default (set ``f5_device=mps`` if the benchmark
-        in ``scripts/bench_f5.py`` shows MPS wins on your machine).
-        """
         pref = (self._device or "auto").lower()
         if pref == "cpu":
             return "cpu"
@@ -155,7 +283,6 @@ class F5Provider(TTSProvider):
             return "cuda" if torch.cuda.is_available() else "cpu"
         if pref == "mps":
             return "mps" if torch.backends.mps.is_available() else "cpu"
-        # auto
         if torch.cuda.is_available():
             return "cuda"
         return "cpu"
@@ -174,16 +301,23 @@ class F5Provider(TTSProvider):
             )
 
         ref_audio = str(registry[slug]["audio"])
-        ref_text = Path(registry[slug]["transcript"]).read_text(encoding="utf-8").strip()
 
         try:
             from f5_tts.infer.utils_infer import preprocess_ref_audio_text
 
-            proc_audio, proc_text = preprocess_ref_audio_text(ref_audio, ref_text)
+            # Pass empty string to let Whisper transcribe the clipped audio,
+            # ensuring ref_text matches exactly what F5 internally uses.
+            proc_audio, proc_text = preprocess_ref_audio_text(
+                ref_audio, "",
+                show_info=lambda msg: logger.debug("F5 preprocess: %s", msg),
+            )
         except Exception as exc:  # noqa: BLE001
             raise ProviderError(
                 self.name, f"failed to preprocess reference {slug!r}: {exc}"
             ) from exc
 
-        self._ref_cache[slug] = {"audio": proc_audio, "text": proc_text}
+        # Condition: RMS-normalize + trailing noise pad
+        conditioned = _condition_reference_audio(proc_audio, SAMPLE_RATE)
+
+        self._ref_cache[slug] = {"audio": conditioned, "text": proc_text}
         return self._ref_cache[slug]

@@ -16,6 +16,7 @@ dependencies = [
     "python-multipart>=0.0.9",
     "numpy>=1.26",
     "soundfile>=0.12",
+    "scipy>=1.11",
     # pydub relies on the stdlib `audioop` module, which was removed in Python 3.13.
     # audioop-lts backports it for 3.13+ (this machine runs 3.14).
     "audioop-lts; python_version >= '3.13'",
@@ -31,13 +32,6 @@ dependencies = [
 dev = [
     "pytest>=8",
     "respx>=0.21",
-]
-# CosyVoice3 (MLX) sleep-story provider — Apple Silicon only, imported lazily at
-# synthesis. `mlx-audio-plus` exposes the FunAudioLLM CosyVoice3 runtime and
-# imports as `mlx_audio`. Kept out of the base deps so non-Mac/CI installs (and
-# `uv run pytest`, which uses fakes) stay clean: opt in with `uv sync --extra mlx`.
-mlx = [
-    "mlx-audio-plus>=0.1.8",
 ]
 # Long-form quality control (opt-in via Settings.enable_qc) — local Whisper for
 # transcript WER + a speaker encoder for cloned-voice drift. Heavy and imported
