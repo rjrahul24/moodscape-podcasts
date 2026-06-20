@@ -16,7 +16,6 @@ interface Props {
   pauseMs: number;
   ramp: boolean;
   ambientBed: string;
-  stylePrompt: string;
   proseText: string;
   onProviderChange: (provider: string) => void;
   onVoiceChange: (voiceId: string) => void;
@@ -25,7 +24,6 @@ interface Props {
   onPauseChange: (pauseMs: number) => void;
   onRampChange: (ramp: boolean) => void;
   onAmbientChange: (slug: string) => void;
-  onStyleChange: (style: string) => void;
   onProseChange: (text: string) => void;
 }
 
@@ -33,7 +31,6 @@ const PROVIDER_LABELS: Record<string, string> = {
   elevenlabs: "ElevenLabs",
   kokoro: "Kokoro",
   f5: "F5",
-  cosyvoice: "CosyVoice3",
 };
 
 const PLACEHOLDER = `Paste your full sleep story here as plain prose — no speaker tags needed.
@@ -60,7 +57,6 @@ export function SleepStoryConfig({
   pauseMs,
   ramp,
   ambientBed,
-  stylePrompt,
   proseText,
   onProviderChange,
   onVoiceChange,
@@ -69,12 +65,10 @@ export function SleepStoryConfig({
   onPauseChange,
   onRampChange,
   onAmbientChange,
-  onStyleChange,
   onProseChange,
 }: Props) {
   const group = providerVoices.find((p) => p.provider === provider);
   const isElevenLabs = provider === "elevenlabs";
-  const isCosyVoice = provider === "cosyvoice";
   const wordCount = proseText.trim() ? proseText.trim().split(/\s+/).length : 0;
 
   return (
@@ -195,22 +189,6 @@ export function SleepStoryConfig({
             )}
           </label>
 
-          {isCosyVoice && (
-            <label className="field field-wide">
-              <span className="field-label">Delivery style</span>
-              <input
-                type="text"
-                value={stylePrompt}
-                placeholder="Speak softly, gently, and very slowly, with a calm, hypnotic rhythm."
-                onChange={(e) => onStyleChange(e.target.value)}
-              />
-              <span className="hint">
-                CosyVoice3 follows this instruction to drive the pace and tone —
-                independent of the cloned voice. The Speed slider is ignored for
-                this model.
-              </span>
-            </label>
-          )}
         </div>
       </section>
 

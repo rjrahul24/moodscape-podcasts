@@ -38,11 +38,10 @@ export default function App() {
   const [sleepProvider, setSleepProvider] = useState("kokoro");
   const [sleepVoiceId, setSleepVoiceId] = useState("");
   const [sleepModel, setSleepModel] = useState(ELEVENLABS_MODELS[0].id);
-  const [sleepSpeed, setSleepSpeed] = useState(0.85);
+  const [sleepSpeed, setSleepSpeed] = useState(0.78);
   const [sleepPauseMs, setSleepPauseMs] = useState(900);
   const [sleepRamp, setSleepRamp] = useState(true);
   const [sleepAmbient, setSleepAmbient] = useState("");
-  const [sleepStyle, setSleepStyle] = useState("");
   const [proseText, setProseText] = useState("");
 
   // Shared job state
@@ -160,10 +159,7 @@ export default function App() {
             pause_ms: sleepPauseMs,
             ramp: sleepRamp,
             ambient_bed: sleepAmbient || null,
-            style_prompt:
-              sleepProvider === "cosyvoice" && sleepStyle.trim()
-                ? sleepStyle.trim()
-                : null,
+            style_prompt: null,
           },
           setProgress,
         );
@@ -224,7 +220,6 @@ export default function App() {
           pauseMs={sleepPauseMs}
           ramp={sleepRamp}
           ambientBed={sleepAmbient}
-          stylePrompt={sleepStyle}
           proseText={proseText}
           onProviderChange={handleSleepProviderChange}
           onVoiceChange={setSleepVoiceId}
@@ -233,7 +228,6 @@ export default function App() {
           onPauseChange={setSleepPauseMs}
           onRampChange={setSleepRamp}
           onAmbientChange={setSleepAmbient}
-          onStyleChange={setSleepStyle}
           onProseChange={setProseText}
         />
       ) : (

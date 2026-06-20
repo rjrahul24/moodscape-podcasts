@@ -83,7 +83,6 @@ export interface SleepStoryJobRequest {
   ambient_bed?: string | null;
   // Progressive ramp-down: speed eases and pauses lengthen toward sleep onset.
   ramp?: boolean; // default true
-  // Delivery directive for instruct-capable providers (CosyVoice3); else ignored.
   style_prompt?: string | null;
   seed?: number | null; // deterministic ElevenLabs re-renders (optional)
 }
@@ -126,7 +125,7 @@ export interface SeriesInfo {
 export interface ReferenceVoiceCreated {
   id: string;
   name: string;
-  providers: string[]; // cloning providers that can now use it (f5, cosyvoice)
+  providers: string[]; // cloning providers that can now use it (f5)
   transcript: string;
   replaced: boolean;
   notes: string[]; // hygiene steps applied / skipped

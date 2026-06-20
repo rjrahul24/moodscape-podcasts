@@ -9,7 +9,7 @@ interface Props {
 }
 
 // Upload a short clip to clone. The clip is cleaned server-side (mono, resample,
-// silence-trim, optional denoise) and added to F5 + CosyVoice3's shared voices.
+// silence-trim, optional denoise) and added to F5's voices.
 export function AddVoice({ onAdded }: Props) {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
