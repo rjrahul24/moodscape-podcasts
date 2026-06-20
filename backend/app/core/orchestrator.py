@@ -23,21 +23,36 @@ from pathlib import Path
 
 from app.config import Settings
 from app.providers import reference_voice_registry, registry
-from app.storage import ambient_registry, files
+from app.storage import ambient_registry, files, series_registry
 
-from . import ambient, chunker, ffmpeg_stitch, qc, sleep_post, sleep_text, text_processor
-from .errors import AmbientBedError, VoiceAssignmentError
+from . import ambient, chunker, ffmpeg_stitch, podcast_music, qc, sleep_post, sleep_text, text_processor
+from .errors import AmbientBedError, SeriesMusicError, VoiceAssignmentError
 from .models import (
     GeneratedFile,
     GenerateResult,
     PodcastRequest,
     QCReport,
     SegmentInfo,
+    SeriesConfig,
     SleepStoryRequest,
 )
 from .script_parser import distinct_speakers, parse_script
 
 logger = logging.getLogger("moodscape")
+
+
+def _wav_duration_ms(wav_path: Path) -> int:
+    """Return the duration of a WAV file in milliseconds via ffprobe."""
+    import subprocess
+    result = subprocess.run(
+        [
+            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1", str(wav_path),
+        ],
+        capture_output=True, text=True,
+    )
+    return int(float(result.stdout.strip()) * 1000)
+
 
 # Providers that clone from a reference clip — the only ones speaker-similarity QC
 # can score (it needs the reference timbre to compare against).
@@ -75,6 +90,16 @@ def _chunk_overrides(settings: Settings) -> dict[str, int]:
     }
 
 
+def _segment_format_for(
+    provider_name: str, settings: Settings, *, request_override: str | None = None,
+) -> str:
+    if request_override:
+        return request_override
+    if provider_name == "elevenlabs" and settings.elevenlabs_segment_format:
+        return settings.elevenlabs_segment_format
+    return settings.segment_output_format
+
+
 # ── podcast pacing plan ──────────────────────────────────────────────────────
 @dataclass(frozen=True)
 class _Speech:
@@ -93,15 +118,21 @@ class _Speech:
     turn_index: int
     emotion: str | None
     gap_after_ms: int
+    section: str = "body"
     prev_text: str = ""
     next_text: str = ""
 
 
 @dataclass(frozen=True)
 class _Silence:
-    """A silence op (variable inter-turn gap or explicit author pause)."""
+    """A silence op (variable inter-turn gap or explicit author pause).
+
+    ``section`` tracks which script section this silence belongs to, so the
+    orchestrator can group rendered files by section for music mixing.
+    """
 
     ms: int
+    section: str = "body"
 
 
 def _draw_turn_gap(rng: random.Random, base_gap_ms: int, jitter: float) -> int:
@@ -139,7 +170,7 @@ def _podcast_voice_settings(
         vs["content_type"] = "podcast"
         if op.model_id:
             vs["model_id"] = op.model_id
-        vs["speed"] = _draw_speed(rng, settings)
+        vs["speed"] = settings.podcast_default_speed
     elif provider.consumes_local_speed:
         vs["speed"] = _draw_speed(rng, settings)
     if getattr(provider, "accepts_continuity", False):
@@ -227,10 +258,11 @@ def _build_podcast_ops(
     prev_turn_index: int | None = None
     for turn in turns:
         assignment = speakers[turn.speaker]
+        section = getattr(turn, "section", "body")
         if prev_turn_index is not None:
             gap = _draw_turn_gap(rng, gap_ms, settings.podcast_turn_gap_jitter)
             if gap > 0:
-                ops.append(_Silence(gap))
+                ops.append(_Silence(gap, section=section))
         max_chars = chunker.budget_for(assignment.provider, overrides=overrides)
         items = text_processor.plan_turn(
             turn.text,
@@ -244,7 +276,7 @@ def _build_podcast_ops(
         for item in items:
             if isinstance(item, text_processor.Pause):
                 if item.ms > 0:
-                    ops.append(_Silence(item.ms))
+                    ops.append(_Silence(item.ms, section=section))
             else:
                 ops.append(
                     _Speech(
@@ -256,6 +288,7 @@ def _build_podcast_ops(
                         turn_index=turn.index,
                         emotion=item.emotion,
                         gap_after_ms=item.gap_after_ms,
+                        section=section,
                     )
                 )
         prev_turn_index = turn.index
@@ -408,6 +441,121 @@ def _attach_qc(
 
 
 # ── podcast ──────────────────────────────────────────────────────────────────
+
+def _load_series(
+    request: PodcastRequest, settings: Settings,
+) -> SeriesConfig | None:
+    """Load and validate the series config if ``request.series`` is set."""
+    if not request.series:
+        return None
+    config = series_registry.get(request.series, settings.series_dir)
+    for attr in ("intro_music", "outro_music"):
+        music_file = settings.podcast_music_dir / getattr(config, attr)
+        if not music_file.is_file():
+            raise SeriesMusicError(
+                f"Music file {getattr(config, attr)!r} not found "
+                f"in {settings.podcast_music_dir}."
+            )
+    return config
+
+
+def _stitch_section(
+    paths: list[Path], work_dir: Path, name: str,
+) -> Path:
+    """Stitch a list of chunk WAVs into a single section WAV."""
+    list_file = ffmpeg_stitch.build_concat_list(paths, work_dir / f"{name}_list.txt")
+    return ffmpeg_stitch.concat(list_file, work_dir / f"{name}.wav")
+
+
+def _stitch_with_music(
+    tagged_paths: list[tuple[Path, str]],
+    work_dir: Path,
+    settings: Settings,
+    series_config: SeriesConfig | None,
+    report,
+    total: int,
+    silence_ms_by_section: dict[str, int],
+) -> tuple[Path, int]:
+    """Stitch rendered chunks, mixing music under intro/outro if a series is set.
+
+    Returns ``(master_wav, total_silence_ms)``.
+    """
+    has_sections = series_config is not None and any(
+        s != "body" for _, s in tagged_paths
+    )
+
+    if not has_sections:
+        # No series or no section markers — flat stitch (original behaviour).
+        report(step="Stitching", chunks_done=total, chunks_total=total)
+        paths = [p for p, _ in tagged_paths]
+        list_file = ffmpeg_stitch.build_concat_list(paths, work_dir / "list.txt")
+        master = ffmpeg_stitch.concat(list_file, work_dir / "master.wav")
+        return master, sum(silence_ms_by_section.values())
+
+    # Group paths by section, preserving order.
+    sections: dict[str, list[Path]] = {}
+    for path, section in tagged_paths:
+        sections.setdefault(section, []).append(path)
+
+    section_wavs: list[Path] = []
+    total_silence = 0
+    rate = settings.target_sample_rate
+
+    for section_name in ("intro", "body", "outro"):
+        paths = sections.get(section_name)
+        if not paths:
+            continue
+        report(step=f"Stitching {section_name}", chunks_done=total, chunks_total=total)
+        section_wav = _stitch_section(paths, work_dir, section_name)
+        total_silence += silence_ms_by_section.get(section_name, 0)
+
+        if section_name == "intro" and series_config is not None:
+            music_path = settings.podcast_music_dir / series_config.intro_music
+            report(step="Mixing intro music", chunks_done=total, chunks_total=total)
+            speech_ms = _wav_duration_ms(section_wav)
+            mixed = podcast_music.mix_intro(
+                section_wav,
+                music_path,
+                work_dir / "intro_mixed.wav",
+                speech_ms=speech_ms,
+                preroll_s=series_config.intro_preroll_s,
+                fade_start_s=series_config.intro_fade_start_s,
+                full_gain_db=series_config.music_full_gain_db,
+                bg_gain_db=series_config.music_bg_gain_db,
+                crossfade_s=series_config.music_crossfade_s,
+                sample_rate=rate,
+            )
+            section_wavs.append(mixed)
+        elif section_name == "outro" and series_config is not None:
+            music_path = settings.podcast_music_dir / series_config.outro_music
+            report(step="Mixing outro music", chunks_done=total, chunks_total=total)
+            speech_ms = _wav_duration_ms(section_wav)
+            mixed = podcast_music.mix_outro(
+                section_wav,
+                music_path,
+                work_dir / "outro_mixed.wav",
+                speech_ms=speech_ms,
+                postroll_s=series_config.outro_postroll_s,
+                full_gain_db=series_config.music_full_gain_db,
+                bg_gain_db=series_config.music_bg_gain_db,
+                crossfade_s=series_config.music_crossfade_s,
+                sample_rate=rate,
+            )
+            section_wavs.append(mixed)
+        else:
+            section_wavs.append(section_wav)
+
+    if len(section_wavs) == 1:
+        return section_wavs[0], total_silence
+
+    report(step="Stitching final", chunks_done=total, chunks_total=total)
+    final_list = ffmpeg_stitch.build_concat_list(
+        section_wavs, work_dir / "final_list.txt"
+    )
+    master = ffmpeg_stitch.concat(final_list, work_dir / "master.wav")
+    return master, total_silence
+
+
 def _run_podcast(
     request: PodcastRequest, settings: Settings, report, job_id: str
 ) -> GenerateResult:
@@ -417,7 +565,9 @@ def _run_podcast(
     if missing:
         raise VoiceAssignmentError("No voice assigned for: " + ", ".join(missing) + ".")
 
-    output_format = request.output_format or settings.segment_output_format
+    series_config = _load_series(request, settings)
+
+    req_format = request.output_format
     gap_ms = request.gap_ms if request.gap_ms is not None else settings.inter_turn_gap_ms
     rate = settings.target_sample_rate
     overrides = _chunk_overrides(settings)
@@ -426,18 +576,15 @@ def _run_podcast(
     work_dir = out_dir / "_chunks"
     work_dir.mkdir(parents=True, exist_ok=True)
 
-    concat_paths: list[Path] = []
-    # Aggregate render time per turn for SegmentInfo.
+    # Each entry is (path, section) so the stitcher can group by section.
+    tagged_paths: list[tuple[Path, str]] = []
     turn_durations: dict[int, int] = {}
-    turn_meta: dict[int, tuple[str, str, str]] = {}  # turn_index -> (speaker, voice, provider)
-    silence_ms = 0
+    turn_meta: dict[int, tuple[str, str, str]] = {}
+    silence_ms_by_section: dict[str, int] = {}
     chunk_counter = 0
     gap_counter = 0
 
     if request.pacing:
-        # Conversational render: sentence micro-pauses, variable turn gaps,
-        # per-chunk speed jitter, and inline tone/pause tags. Seed the RNG from
-        # the job id so pacing is deterministic and reproducible.
         rng = random.Random(job_id)
         ops = _build_podcast_ops(turns, request.speakers, settings, gap_ms, overrides, rng)
         total = sum(1 for op in ops if isinstance(op, _Speech))
@@ -446,22 +593,30 @@ def _run_podcast(
             if isinstance(op, _Silence):
                 gap_path = work_dir / f"gap_{gap_counter:05d}.wav"
                 ffmpeg_stitch.silence_wav(gap_path, duration_ms=op.ms, sample_rate=rate)
-                concat_paths.append(gap_path)
-                silence_ms += op.ms
+                tagged_paths.append((gap_path, op.section))
+                silence_ms_by_section[op.section] = (
+                    silence_ms_by_section.get(op.section, 0) + op.ms
+                )
                 gap_counter += 1
+                continue
+
+            if not op.text.strip():
+                logger.warning("Skipping empty speech op (turn %d)", op.turn_index)
+                done += 1
                 continue
 
             provider = registry.get(op.provider)
             vs = _podcast_voice_settings(provider, op, rng, settings, seed=request.seed)
+            fmt = _segment_format_for(op.provider, settings, request_override=req_format)
             seg = provider.synthesize(
-                op.text, op.voice_id, output_format=output_format, voice_settings=vs
+                op.text, op.voice_id, output_format=fmt, voice_settings=vs
             )
             chunk_path = work_dir / f"chunk_{chunk_counter:05d}.wav"
             ffmpeg_stitch.segment_to_wav_file(
                 seg, chunk_path, sample_rate=rate, channels=1,
                 edge_fade_ms=settings.chunk_edge_fade_ms,
             )
-            concat_paths.append(chunk_path)
+            tagged_paths.append((chunk_path, op.section))
             chunk_counter += 1
 
             turn_durations[op.turn_index] = turn_durations.get(op.turn_index, 0) + len(seg)
@@ -475,12 +630,13 @@ def _run_podcast(
                 ffmpeg_stitch.silence_wav(
                     gap_path, duration_ms=op.gap_after_ms, sample_rate=rate
                 )
-                concat_paths.append(gap_path)
-                silence_ms += op.gap_after_ms
+                tagged_paths.append((gap_path, op.section))
+                silence_ms_by_section[op.section] = (
+                    silence_ms_by_section.get(op.section, 0) + op.gap_after_ms
+                )
                 gap_counter += 1
     else:
-        # Legacy flat render: one block per turn, fixed inter-turn gap, no emotion.
-        plan: list[tuple[chunker.TextChunk, str, str]] = []  # (chunk, provider, voice_id)
+        plan: list[tuple[chunker.TextChunk, str, str]] = []
         idx = 0
         for turn in turns:
             assignment = request.speakers[turn.speaker]
@@ -496,18 +652,21 @@ def _run_podcast(
             if prev_turn_index is not None and chunk.turn_index != prev_turn_index and gap_ms > 0:
                 gap_path = work_dir / f"gap_{gap_counter:05d}.wav"
                 ffmpeg_stitch.silence_wav(gap_path, duration_ms=gap_ms, sample_rate=rate)
-                concat_paths.append(gap_path)
-                silence_ms += gap_ms
+                tagged_paths.append((gap_path, "body"))
+                silence_ms_by_section["body"] = (
+                    silence_ms_by_section.get("body", 0) + gap_ms
+                )
                 gap_counter += 1
 
             provider = registry.get(provider_name)
-            seg = provider.synthesize(chunk.text, voice_id, output_format=output_format)
+            fmt = _segment_format_for(provider_name, settings, request_override=req_format)
+            seg = provider.synthesize(chunk.text, voice_id, output_format=fmt)
             chunk_path = work_dir / f"chunk_{i:05d}.wav"
             ffmpeg_stitch.segment_to_wav_file(
                 seg, chunk_path, sample_rate=rate, channels=1,
                 edge_fade_ms=settings.chunk_edge_fade_ms,
             )
-            concat_paths.append(chunk_path)
+            tagged_paths.append((chunk_path, "body"))
 
             turn_durations[chunk.turn_index] = turn_durations.get(chunk.turn_index, 0) + len(seg)
             turn_meta[chunk.turn_index] = (chunk.speaker, voice_id, provider_name)
@@ -515,9 +674,10 @@ def _run_podcast(
 
             report(step=f"Synthesizing {i + 1}/{total}", chunks_done=i + 1, chunks_total=total)
 
-    report(step="Stitching", chunks_done=total, chunks_total=total)
-    list_file = ffmpeg_stitch.build_concat_list(concat_paths, work_dir / "list.txt")
-    master = ffmpeg_stitch.concat(list_file, work_dir / "master.wav")
+    master, total_silence = _stitch_with_music(
+        tagged_paths, work_dir, settings, series_config, report, total,
+        silence_ms_by_section,
+    )
 
     written = _finalize(
         master,
@@ -537,7 +697,7 @@ def _run_podcast(
         )
         for ti in sorted(turn_durations)
     ]
-    duration_ms = sum(turn_durations.values()) + silence_ms
+    duration_ms = sum(turn_durations.values()) + total_silence
 
     return GenerateResult(
         job_id=job_id,
@@ -609,7 +769,7 @@ def _run_sleep(
         seg = provider.synthesize(
             chunk.text,
             request.voice_id,
-            output_format=settings.segment_output_format,
+            output_format=_segment_format_for(provider_name, settings),
             voice_settings=voice_settings,
         )
         chunk_path = work_dir / f"chunk_{i:05d}.wav"

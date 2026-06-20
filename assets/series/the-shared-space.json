@@ -1,0 +1,16 @@
+{
+  "name": "The Shared Space",
+  "slug": "the-shared-space",
+  "speakers": {
+    "Speaker 1": "Maya",
+    "Speaker 2": "Kai"
+  },
+  "intro_music": "shared-space-intro.mp3",
+  "outro_music": "shared-space-outro.mp3",
+  "intro_preroll_s": 10.0,
+  "intro_fade_start_s": 8.0,
+  "outro_postroll_s": 15.0,
+  "music_full_gain_db": -12.0,
+  "music_bg_gain_db": -22.0,
+  "music_crossfade_s": 2.0
+}

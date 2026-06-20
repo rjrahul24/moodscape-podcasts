@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import ambient, generate, health, jobs, voices
+from app.api.routes import ambient, generate, health, jobs, series, voices
 from app.config import get_settings
 from app.core.jobs import JobStore
 from app.providers.bootstrap import bootstrap_providers
@@ -46,6 +46,7 @@ def create_app() -> FastAPI:
     app.include_router(generate.router, prefix="/api")
     app.include_router(jobs.router, prefix="/api")
     app.include_router(ambient.router, prefix="/api")
+    app.include_router(series.router, prefix="/api")
     return app
 
 

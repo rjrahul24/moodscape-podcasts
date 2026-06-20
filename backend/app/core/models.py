@@ -39,6 +39,7 @@ class ScriptTurn(BaseModel):
     index: int
     speaker: str
     text: str
+    section: Literal["intro", "body", "outro"] = "body"
 
 
 class SpeakerVoice(BaseModel):
@@ -86,6 +87,8 @@ class PodcastRequest(BaseModel):
     # Optional deterministic seed forwarded to ElevenLabs so a re-render matches
     # the previous cadence/emotion trajectory. None lets the model sample freely.
     seed: int | None = None
+    # Series slug for branded intro/outro with music. None = no branding.
+    series: str | None = None
 
 
 class SleepStoryRequest(BaseModel):
@@ -201,6 +204,40 @@ class JobView(BaseModel):
     kind: Literal["podcast", "sleep_story"]
     progress: JobProgress
     result: GenerateResult | None = None
+
+
+class SeriesConfig(BaseModel):
+    """Brand configuration for a podcast series (intro/outro music, persona names).
+
+    The intro and outro each have a dedicated music file (~30 seconds). The
+    system mixes speech and music with a multi-stage volume envelope:
+
+    **Intro**: music plays solo for ``intro_preroll_s``, then fades to background
+    as speech begins, stays quiet under speech, and fades out when speech ends.
+
+    **Outro**: music fades in quietly under speech, stays in background, then
+    swells to full when speech ends and plays solo for ``outro_postroll_s``
+    before fading out.
+    """
+
+    name: str
+    slug: str
+    speakers: dict[str, str]
+    intro_music: str
+    outro_music: str
+    intro_preroll_s: float = 10.0
+    intro_fade_start_s: float = 8.0
+    outro_postroll_s: float = 15.0
+    music_full_gain_db: float = -12.0
+    music_bg_gain_db: float = -22.0
+    music_crossfade_s: float = 2.0
+
+
+class SeriesInfo(BaseModel):
+    """Surfaced to the frontend via ``GET /api/series``."""
+
+    id: str
+    name: str
 
 
 class AmbientBed(BaseModel):

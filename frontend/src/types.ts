@@ -69,6 +69,7 @@ export interface PodcastJobRequest {
   gap_ms?: number | null;
   pacing?: boolean; // conversational pacing + tone tags (default true)
   seed?: number | null; // deterministic ElevenLabs re-renders (optional)
+  series?: string | null; // series slug for branded intro/outro with music
 }
 
 export interface SleepStoryJobRequest {
@@ -112,6 +113,11 @@ export interface JobView {
 }
 
 export interface AmbientBed {
+  id: string;
+  name: string;
+}
+
+export interface SeriesInfo {
   id: string;
   name: string;
 }

@@ -3,6 +3,62 @@
 Append-only log of notable changes and the decisions behind them. Newest first.
 Every change should add an entry (see `CLAUDE.md` → Documentation discipline).
 
+## 2026-06-20 — Phase 7: ElevenLabs podcast quality — v3 continuity, PCM intermediates, tuning
+
+Addressed voice drift, irregular pronunciations, mid-sentence tone changes, and
+harshness in ElevenLabs podcast output. Five root-cause fixes:
+
+- **v3 continuity context enabled.** `previous_text`/`next_text` were only
+  injected for v2 — v3 (the default podcast model) got no cross-chunk prosody
+  context, causing voice drift. Moved continuity injection out of the v2-only
+  branch so both generations benefit. (`elevenlabs_provider.py`)
+- **Lossless PCM intermediates.** Changed the ElevenLabs segment format from
+  `mp3_44100_128` to `pcm_44100` to eliminate double-encode quality loss.
+  Added raw-PCM decoding in `stitcher.bytes_to_segment` and a per-provider
+  format override (`elevenlabs_segment_format`) so other providers keep their
+  defaults. (`stitcher.py`, `config.py`, `orchestrator.py`)
+- **Chunk size reduced from 2400 to 1000 chars.** Community consensus and API
+  research show >2000 chars causes pacing drift within a single ElevenLabs call.
+  Trade-off: ~2.4× more API calls per job (priced per character, not per
+  request, so no cost increase). (`config.py`, `chunker.py`)
+- **Speed jitter removed for cloud providers.** The ±3% per-chunk speed variance
+  was designed for local models; on ElevenLabs each chunk regenerates from
+  scratch, so jitter fought the model's own prosody. Cloud providers now use the
+  fixed base speed; local models keep jitter. (`orchestrator.py`)
+- **v3 similarity_boost tuned from 0.85 to 0.80.** Aligned with the v2
+  research-validated podcast baseline; 0.85 was too aggressive and contributed
+  to harshness. (`elevenlabs_provider.py`)
+
+## 2026-06-19 — Phase 6: Podcast branding — series, intro/outro music, prompting guides
+
+Added branded podcast series with signature intro/outro music and split the
+ElevenLabs prompting guide into podcast and sleep story variants. Spec:
+`docs/superpowers/specs/2026-06-19-podcast-branding-intro-outro-design.md`.
+
+- **Series configuration system.** JSON configs in `assets/series/<slug>.json`
+  define a branded podcast series (show name, speaker persona names, music
+  references, gain/fade settings). Discovered by `series_registry.scan`, listed at
+  `GET /api/series`, selectable in the frontend's Speakers panel.
+- **Script section markers.** `[INTRO]`, `[BODY]`, `[OUTRO]` on their own line in
+  the script. The parser annotates each `ScriptTurn` with a `section` field.
+  Without markers, all turns default to "body" — fully backward compatible.
+- **Intro/outro music mixing with volume envelopes.** Each series has separate
+  intro and outro music files (~30 s). The mixer applies a multi-stage volume
+  envelope via `volume` eval=frame: **intro** has a 10 s music-only pre-roll at
+  full volume (-12 dB), fading to background (-22 dB) as speech starts; **outro**
+  has quiet music under speech that swells to full when speech ends, then plays
+  solo for 15 s before fading out. All timing is configurable per series and
+  adapts to variable speech duration. Body stays purely vocal.
+- **Prompting guide split.** Replaced the unified `elevenlabs.md` with two
+  specialized guides: `elevenlabs_podcast.md` (highly tuned for branded podcast
+  scripts — section markers, intro/outro structure, emotional arc, v3 tag best
+  practices, series-aware INPUTS) and `elevenlabs_sleep.md` (single-narrator sleep
+  prose — rhythm, imagery, progressive calm, tone guidance). Updated README routing
+  table to distinguish by content type + model.
+- **`PodcastRequest.series`** — optional slug field. When set, the orchestrator
+  loads the series config and applies music mixing. When unset, identical to
+  previous behavior.
+
 ## 2026-06-19 — Phase 5: ElevenLabs expressive podcasts + calm sleep
 
 Reworked the ElevenLabs path per two research briefs to make podcasts more

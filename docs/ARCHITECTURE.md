@@ -55,11 +55,12 @@ app/
       generate.py    POST /api/generate (legacy sync), GET /api/download/{job}/{file}
       jobs.py        POST /api/jobs, GET /api/jobs/{id}, GET /api/jobs/{id}/events (SSE)
       ambient.py     GET /api/ambient        (ambient beds for sleep stories)
+      series.py      GET /api/series        (podcast series for branded intro/outro)
   core/
     models.py        Voice, ProviderVoices, ScriptTurn, SpeakerVoice, Generate*,
                      PodcastRequest/SleepStoryRequest (discriminated JobRequest),
-                     Job{Created,Progress,View}, AmbientBed
-    script_parser.py "[Speaker N]: …" -> ordered turns
+                     Job{Created,Progress,View}, AmbientBed, SeriesConfig/Info
+    script_parser.py "[Speaker N]: …" -> ordered turns; [INTRO]/[BODY]/[OUTRO] sections
     chunker.py       sentence/turn-aware chunking (pure; per-provider char budgets)
     text_processor.py podcast pacing: turn -> Speech/Pause plan items (pure)
     emotion.py       shared tone-tag vocabulary + emotion->speed multipliers (pure)
@@ -70,6 +71,7 @@ app/
     ffmpeg_stitch.py disk-based stitch: chunk WAVs -> ffmpeg concat -> WAV/MP3
     sleep_post.py    sleep-only ffmpeg filter chain (loudnorm/EQ/compress/fades)
     ambient.py       sleep-only ambient bed mix (loop/trim/gain/fade + amix)
+    podcast_music.py intro/outro music mix (volume envelope + amix, mono)
     engine.py        legacy shim: GenerateRequest -> orchestrator.run
     stitcher.py      decode/convert + (legacy) in-memory normalize/concat/export
     errors.py        domain exceptions -> HTTP codes
@@ -86,6 +88,7 @@ app/
   storage/
     files.py             per-job output dirs + safe download resolution
     ambient_registry.py  scan assets/ambient/*.{wav,mp3} -> {slug: Path}
+    series_registry.py   scan assets/series/*.json -> {slug: SeriesConfig}
 ```
 
 ## The provider abstraction
@@ -119,7 +122,11 @@ the engine and stitcher work in one currency:
 - CosyVoice3: `mlx_audio` writes a 24 kHz WAV → `AudioSegment.from_file(...)`.
 
 `output_format` is meaningful to cloud providers (it selects request quality);
-local providers ignore it (they have a fixed native rate).
+local providers ignore it (they have a fixed native rate). ElevenLabs uses a
+per-provider override (`ELEVENLABS_SEGMENT_FORMAT=pcm_44100` by default) to
+request raw PCM, avoiding double-encode quality loss; `bytes_to_segment`
+handles `pcm_*` formats by constructing the `AudioSegment` from raw 16-bit
+mono samples.
 
 ### Per-job parameters via `voice_settings`
 
@@ -128,9 +135,10 @@ orchestrator passes a `voice_settings` dict, and providers read what they
 understand (ignoring keys they don't). The keys today:
 
 - **`speed`** — sleep stories pass the configured slow speed; podcasts pass a
-  per-chunk jittered speed. Speed-aware local models (`consumes_local_speed`)
-  apply it as a rate multiplier; ElevenLabs (`has_native_speed`) applies it as a
-  model-native speed clamped to 0.7–1.2.
+  fixed base speed for cloud providers (`has_native_speed`) or a per-chunk
+  jittered speed for local models (`consumes_local_speed`). ElevenLabs applies
+  it as a model-native speed clamped to 0.7–1.2; local models use it as a rate
+  multiplier.
 - **`emotion`** — a recognized podcast tone tag. Kokoro/F5 multiply it into their
   rate via `core/emotion.py`. ElevenLabs handles it per model: **v2** maps it to a
   numeric `stability/similarity_boost/style` profile; **v3** performs it as an
@@ -206,7 +214,7 @@ Both paths always send `use_speaker_boost` and (top-level) `apply_text_normaliza
 plus `previous_text`/`next_text`/`seed` when supplied. The model is chosen from
 `model_id` (per speaker / per sleep story) or, when unset, the provider's
 per-content default (`ELEVENLABS_PODCAST_MODEL` / `ELEVENLABS_SLEEP_MODEL`, both
-**`eleven_v3`**). `ELEVENLABS_CHUNK_CHARS=2400` stays under v3's 5k cap.
+**`eleven_v3`**). `ELEVENLABS_CHUNK_CHARS=1000` stays under v3's 5k cap.
 
 ### Kokoro (local)
 `kokoro.KPipeline(lang_code, repo_id="hexgrad/Kokoro-82M", trf=True, device)`.
@@ -338,7 +346,7 @@ The job's `result` is a `GenerateResult` (same shape as the sync endpoint), so
 `chunker.py` splits text into bounded chunks **before** any provider call so
 Kokoro stays under its 510 phoneme-token cap (it rushes well before that) and F5
 stays within ~30s/pass. Budgets are **character**-based per provider
-(`KOKORO_CHUNK_CHARS=400`, `F5_CHUNK_CHARS=350`, `ELEVENLABS_CHUNK_CHARS=2400`)
+(`KOKORO_CHUNK_CHARS=400`, `F5_CHUNK_CHARS=350`, `ELEVENLABS_CHUNK_CHARS=1000`)
 — the "175/250/450 token" references are phonemized tokens, which track
 characters far better than BPE tokens, and the research's own guidance is
 "~400 chars for Kokoro". The chunker is pure (no provider/ML imports) and splits
@@ -410,10 +418,40 @@ concat and smear conversational turns / sleep pauses).
 Ambient beds are discovered from `assets/ambient/*.{wav,mp3}` via
 `ambient_registry.scan` and listed at `GET /api/ambient`.
 
+## Podcast series & branded intro/outro
+
+A **series** is a branded podcast show with a consistent intro, outro, and
+signature music across episodes. Series configs live as JSON files in
+`assets/series/<slug>.json` and are discovered by `series_registry.scan`, listed
+at `GET /api/series`.
+
+Scripts can include optional **section markers** — `[INTRO]`, `[BODY]`, `[OUTRO]`
+on their own line — which the parser recognizes and annotates each `ScriptTurn`
+with (`section` field). When a series is selected in the request
+(`PodcastRequest.series`) and section markers are present, the orchestrator:
+
+1. Renders all chunks as usual (same synthesis loop), tracking section per chunk.
+2. Groups rendered files by section.
+3. Stitches each section to a separate WAV.
+4. Mixes music with a multi-stage volume envelope per section:
+   - **Intro** (`podcast_music.mix_intro`): 10 s music-only pre-roll at full
+     volume, music fades to background as speech begins, stays quiet under speech,
+     fades out when speech ends. Uses `adelay` + `apad` + `volume` eval=frame.
+   - **Outro** (`podcast_music.mix_outro`): quiet music under speech, music swells
+     to full when speech ends, plays solo for 15 s post-roll, fades out. Uses
+     `apad` + `volume` eval=frame.
+5. Concatenates intro_mixed + body + outro_mixed → master.
+
+Each series has separate intro and outro music files (~30 s each) in
+`assets/podcast_music/`. The volume envelope adapts to variable speech length
+(the prompting guide targets ~20 s intro / ~15 s outro but the system doesn't
+enforce it). Without a series or without section markers, behavior is identical
+to the original flat stitch (backward compatible).
+
 ## Data flow (both content types)
 
-1. Frontend loads `GET /api/voices` (and `GET /api/ambient` for sleep) →
-   populates the model/voice (and ambient) dropdowns.
+1. Frontend loads `GET /api/voices`, `GET /api/ambient` (sleep), and
+   `GET /api/series` (podcast) → populates dropdowns.
 2. User picks a content type. **Podcast:** speaker count + `(provider, voice)`
    per speaker + `[Speaker N]:` script. **Sleep:** one `(provider, voice)`,
    speed/pause/ambient, and plain prose.
@@ -520,3 +558,25 @@ Drop `assets/ambient/<name>.wav` (or `.mp3`), restart the backend — the bed
 appears in the Sleep Story ambient picker and at `GET /api/ambient`. A short
 seamless loop works for a long story (it is looped/trimmed automatically). See
 `assets/ambient/README.md`.
+
+## Runbook: add a podcast series
+
+1. Create `assets/series/<slug>.json` with the series config (see
+   `assets/series/the-shared-space.json` for the format).
+2. Drop the intro/outro music file(s) into `assets/podcast_music/`. A short
+   seamless loop works (it is looped/trimmed automatically by `podcast_music.py`).
+3. Restart the backend — the series appears in the Podcast panel's Series
+   dropdown and at `GET /api/series`.
+4. In your script, use `[INTRO]`, `[BODY]`, `[OUTRO]` section markers. When the
+   series is selected in the app, music is mixed under the intro and outro.
+
+## Runbook: add intro/outro music
+
+Drop two files in `assets/podcast_music/` — one for intro, one for outro (~30 s
+each). Reference them in the series JSON config as `intro_music` and
+`outro_music`. The system applies a multi-stage volume envelope: full volume
+when music plays solo (pre-roll / post-roll), quiet under speech. Tune
+`music_full_gain_db` (solo, default −12 dB) and `music_bg_gain_db` (under
+speech, default −22 dB) in the config. Adjust `intro_preroll_s` (default 10 s),
+`intro_fade_start_s` (default 8 s), `outro_postroll_s` (default 15 s), and
+`music_crossfade_s` (default 2 s) to change timing.

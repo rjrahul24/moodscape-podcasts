@@ -34,3 +34,7 @@ class AudioProcessingError(RuntimeError):
 
 class AmbientBedError(ValueError):
     """The requested ambient bed slug was not found in the ambient assets."""
+
+
+class SeriesMusicError(ValueError):
+    """The series config or its music assets could not be found/loaded."""

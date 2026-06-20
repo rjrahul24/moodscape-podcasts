@@ -1,4 +1,9 @@
-import { ELEVENLABS_MODELS, type ProviderVoices, type SpeakerVoice } from "../types";
+import {
+  ELEVENLABS_MODELS,
+  type ProviderVoices,
+  type SeriesInfo,
+  type SpeakerVoice,
+} from "../types";
 import { Icon } from "./Icon";
 import { VoiceSelect } from "./VoiceSelect";
 
@@ -10,6 +15,9 @@ interface Props {
   onProviderChange: (speaker: string, provider: string) => void;
   onVoiceChange: (speaker: string, voiceId: string) => void;
   onModelChange: (speaker: string, modelId: string) => void;
+  series: string;
+  seriesList: SeriesInfo[];
+  onSeriesChange: (slug: string) => void;
   maxSpeakers?: number;
 }
 
@@ -35,6 +43,9 @@ export function SpeakerConfig({
   onProviderChange,
   onVoiceChange,
   onModelChange,
+  series,
+  seriesList,
+  onSeriesChange,
   maxSpeakers = 6,
 }: Props) {
   const speakers = Array.from({ length: numSpeakers }, (_, i) => speakerLabel(i));
@@ -59,6 +70,25 @@ export function SpeakerConfig({
           </select>
         </label>
       </div>
+
+      {seriesList.length > 0 && (
+        <div className="series-select">
+          <label>
+            Series
+            <select
+              value={series}
+              onChange={(e) => onSeriesChange(e.target.value)}
+            >
+              <option value="">None (no branding)</option>
+              {seriesList.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+      )}
 
       <div className="speaker-rows">
         {speakers.map((speaker) => {

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { fetchVoices } from "./api/client";
-import { fetchAmbient, runJob } from "./api/jobs";
+import { fetchAmbient, fetchSeries, runJob } from "./api/jobs";
 import { AddVoice } from "./components/AddVoice";
 import { ContentTypeSelector } from "./components/ContentTypeSelector";
 import { Icon } from "./components/Icon";
@@ -16,6 +16,7 @@ import {
   type GenerateResult,
   type JobProgress,
   type ProviderVoices,
+  type SeriesInfo,
   type SpeakerVoice,
 } from "./types";
 
@@ -30,6 +31,8 @@ export default function App() {
   const [speakerVoices, setSpeakerVoices] = useState<Record<string, SpeakerVoice>>({});
   const [scriptText, setScriptText] = useState("");
   const [pacing, setPacing] = useState(true);
+  const [seriesList, setSeriesList] = useState<SeriesInfo[]>([]);
+  const [series, setSeries] = useState("");
 
   // Sleep-story state
   const [sleepProvider, setSleepProvider] = useState("kokoro");
@@ -62,6 +65,9 @@ export default function App() {
     fetchAmbient()
       .then(setAmbientBeds)
       .catch(() => setAmbientBeds([]));
+    fetchSeries()
+      .then(setSeriesList)
+      .catch(() => setSeriesList([]));
   }, [loadVoices]);
 
   const defaultProvider = providerVoices[0]?.provider ?? "elevenlabs";
@@ -132,7 +138,13 @@ export default function App() {
         const speakers: Record<string, SpeakerVoice> = {};
         for (const s of activeSpeakers) speakers[s] = speakerVoices[s];
         const view = await runJob(
-          { kind: "podcast", script_text: scriptText, speakers, pacing },
+          {
+            kind: "podcast",
+            script_text: scriptText,
+            speakers,
+            pacing,
+            series: series || null,
+          },
           setProgress,
         );
         setResult(view.result);
@@ -234,6 +246,9 @@ export default function App() {
             onProviderChange={handleProviderChange}
             onVoiceChange={handleVoiceChange}
             onModelChange={handleModelChange}
+            series={series}
+            seriesList={seriesList}
+            onSeriesChange={setSeries}
           />
           <ScriptInput
             value={scriptText}

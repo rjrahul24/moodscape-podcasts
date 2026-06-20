@@ -4,11 +4,18 @@ import type {
   JobProgress,
   JobRequest,
   JobView,
+  SeriesInfo,
 } from "../types";
 import { parseError } from "./client";
 
 export async function fetchAmbient(): Promise<AmbientBed[]> {
   const response = await fetch("/api/ambient");
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json();
+}
+
+export async function fetchSeries(): Promise<SeriesInfo[]> {
+  const response = await fetch("/api/series");
   if (!response.ok) throw new Error(await parseError(response));
   return response.json();
 }

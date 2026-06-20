@@ -53,6 +53,11 @@ class Settings(BaseSettings):
     # Server-side text normalization ("auto"|"on"|"off"): spells numbers/symbols
     # so the model never reads digits in a clipped, transactional tone.
     elevenlabs_text_normalization: str = "auto"
+    # Per-provider intermediate format: higher bitrate than the global default
+    # reduces quality loss when chunks are decoded then re-encoded for the final
+    # master. pcm_44100 is ideal but requires ElevenLabs Pro; mp3_44100_192 is
+    # the best universally available option.
+    elevenlabs_segment_format: str = "mp3_44100_192"
 
     # Providers
     default_provider: str = "elevenlabs"
@@ -129,7 +134,7 @@ class Settings(BaseSettings):
     kokoro_chunk_chars: int = 400
     f5_chunk_chars: int = 250  # ~18s/pass: well under F5's ~30s garble edge
     cosyvoice_chunk_chars: int = 300  # keep chunks under CosyVoice3's ~30s ref window
-    elevenlabs_chunk_chars: int = 2400
+    elevenlabs_chunk_chars: int = 1000
 
     # Sleep stories (single-speaker, calming treatment — NOT applied to podcasts).
     sleep_default_speed: float = 0.85
@@ -149,6 +154,8 @@ class Settings(BaseSettings):
     sleep_ramp_pause_scale: float = 1.6  # final pauses ~60% longer than the first
     ambient_bed_gain_db: float = -22.0  # how far under the narration the bed sits
     ambient_dir: Path = _DEFAULT_ASSETS_DIR / "ambient"
+    series_dir: Path = _DEFAULT_ASSETS_DIR / "series"
+    podcast_music_dir: Path = _DEFAULT_ASSETS_DIR / "podcast_music"
 
     # Long-form quality control (opt-in post-step; deps via `uv sync --extra qc`).
     # Off by default — it transcribes the whole master and embeds windows, so it
