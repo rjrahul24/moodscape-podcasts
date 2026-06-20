@@ -82,8 +82,7 @@ app/
     elevenlabs_provider.py
     kokoro_provider.py     (reads voice_settings["speed"] for per-job speed)
     f5_provider.py         (reads voice_settings["speed"] for per-job speed)
-    cosyvoice_provider.py  (MLX; reads voice_settings["instruct"] for delivery)
-    reference_voice_registry.py  (shared F5 + CosyVoice clone-voice scan)
+    reference_voice_registry.py  (F5 clone-voice scan)
     f5_voice_registry.py   (thin re-export of reference_voice_registry)
   storage/
     files.py             per-job output dirs + safe download resolution
@@ -98,8 +97,7 @@ app/
 - `name: str`
 - **Capability flags** — `consumes_local_speed` (Kokoro, F5: apply a numeric
   `speed` as an internal rate multiplier), `has_native_speed` (ElevenLabs:
-  accepts a model-native `speed`, 0.7–1.2), `accepts_instruct` (CosyVoice3:
-  takes a natural-language delivery directive in `voice_settings["instruct"]`),
+  accepts a model-native `speed`, 0.7–1.2),
   `accepts_inline_sfx` (performs inline breath/SFX and delivery tags rather than
   speaking them; **True on ElevenLabs** — v3 performs them, so the text processor
   leaves them in the text; default False → tags map to short pauses), and
@@ -119,7 +117,6 @@ the engine and stitcher work in one currency:
 
 - ElevenLabs: `synthesize_bytes(...)` → `stitcher.bytes_to_segment(bytes, fmt)`.
 - Kokoro / F5: numpy → `stitcher.numpy_to_segment(samples, 24000)`.
-- CosyVoice3: `mlx_audio` writes a 24 kHz WAV → `AudioSegment.from_file(...)`.
 
 `output_format` is meaningful to cloud providers (it selects request quality);
 local providers ignore it (they have a fixed native rate). ElevenLabs uses a
@@ -148,11 +145,6 @@ understand (ignoring keys they don't). The keys today:
   profile for podcasts vs a calm, high-stability profile for sleep, and the
   selected generation (v2 vs v3, per speaker / per sleep story). Local providers
   ignore them.
-- **`instruct`** — a natural-language delivery directive for CosyVoice3
-  (`accepts_instruct`). The sleep path injects `cosyvoice_sleep_instruct`
-  (overridable per story via `SleepStoryRequest.style_prompt`) so a calm/hypnotic
-  pace is driven by *Instruct Mode*, independent of the cloned clip's energy —
-  CosyVoice3 therefore does **not** take `speed`. Other providers ignore it.
 - **`previous_text` / `next_text` / `seed`** — sent to continuity-capable
   providers (`accepts_continuity`, i.e. ElevenLabs) only. The orchestrator fills
   the first two with the trailing/leading text of the adjacent chunks (≤200 chars,
@@ -178,14 +170,12 @@ synchronous path and the tests that still use it.)
 
 ### Lazy heavy imports
 
-`KokoroProvider` / `F5Provider` / `CosyVoiceProvider` constructors and
-`list_voices()` do **not** import torch/kokoro/f5/mlx_audio. Those imports happen
-only inside `synthesize()` (and the model is cached on the instance as a lazy
-singleton). Consequences:
+`KokoroProvider` / `F5Provider` constructors and `list_voices()` do **not**
+import torch/kokoro/f5. Those imports happen only inside `synthesize()` (and the
+model is cached on the instance as a lazy singleton). Consequences:
 
-- The app always boots; Kokoro/F5/CosyVoice voices populate the dropdowns
-  immediately (Kokoro from a static list, F5/CosyVoice from a filesystem scan) —
-  even on non-Apple-Silicon hosts where `mlx_audio` isn't installed.
+- The app always boots; Kokoro/F5 voices populate the dropdowns immediately
+  (Kokoro from a static list, F5 from a filesystem scan).
 - A missing/broken ML install only fails at generate time, surfaced as a
   `ProviderError` and as a per-provider `error` in `/api/voices`.
 
@@ -247,42 +237,34 @@ assets/speakers/reference_text/<slug>.txt    (verbatim transcript)
 ```
 
 Both files required; the slug is the filename stem; display name is the slug
-title-cased. This registry is **shared** with CosyVoice3 (below);
-`f5_voice_registry` remains as a thin re-export for back-compat.
+title-cased. `f5_voice_registry` remains as a thin re-export for back-compat.
 
-### CosyVoice3 (local, MLX, voice cloning + Instruct Mode)
-`mlx-audio-plus` (imports as `mlx_audio`; **Apple Silicon only**, install via
-`uv sync --extra mlx`). Model `mlx-community/Fun-CosyVoice3-0.5B-2512-4bit`
-(~1.1 GB, downloaded on first synthesis, loaded once via
-`mlx_audio.tts.utils.load_model` and cached). A flow-matching DiT model: more
-drift-stable than autoregressive models over long outputs, and its **Instruct
-Mode** decouples the cloned *timbre* from the *delivery*. `synthesize` calls
-`mlx_audio.tts.generate.generate_audio(...)` with `file_prefix` set to a full path
-inside a temp dir (the function writes `{file_prefix}.wav` relative to CWD — it
-has no output-dir param) and `join_audio=True`, then reads the 24 kHz WAV back as
-an `AudioSegment`. **Mode selection matters:** CosyVoice3's `generate` branches
-zero-shot (`ref_text`) *before* instruct (`instruct_text`), so the two are
-mutually exclusive in practice — with a delivery directive we pass `instruct_text`
-and **omit** `ref_text` (the model skips Whisper when instructing); without one we
-pass `ref_text` for zero-shot cloning (which also skips the ~1.5 GB Whisper
-auto-transcription). Pacing rides the directive, not numeric speed
-(`consumes_local_speed=False`, `accepts_instruct=True`). `CHUNK_CHARS=300` keeps
-chunks under the ~30 s reference window. Shares the F5 clone-voice assets.
-Opt-in for sleep stories; `scripts/bench_cosyvoice.py` renders an A/B sample.
-
-> The installed `mlx-audio-plus` API can differ between versions — the `0.1.8`
-> `generate_audio` has no `output_path`/`seed` params and keys instruct mode off
-> `instruct_text` (not `instruct`). The provider targets the installed contract.
-
-**Apple-Silicon perf hardening (long-form).** Two controls keep 30–90 min jobs
-healthy. `MLX_CACHE_MB` caps MLX's Metal buffer cache (`CosyVoiceProvider.cache_mb`
-→ `_cap_mlx_cache()`, run once at model load, best-effort across MLX releases) so
-the cache can't grow until the box tips into SSD swap. `WARMUP_PROVIDERS=true` runs
-`CosyVoiceProvider.warmup()` (a silent dummy synthesis) at bootstrap to pre-compile
-Metal kernels, moving the ~5× first-inference JIT cost off the first real generate.
-Both default off; warmup is best-effort (no MLX / no voices → no-op).
 `scripts/bench_longform.py` measures RTF + peak RSS per local provider across
 increasing lengths to validate that performance stays bounded.
+
+### F5 reference audio conditioning
+
+The F5 provider conditions reference audio at load time (once per voice per session):
+
+1. **RMS normalization** — reference normalized to -20 dBFS for consistent model input.
+   Opt out via `MOODSCAPE_F5_REF_PRESERVE_DYNAMICS=1`.
+2. **Trailing noise pad** — ~1s of low-level noise (-55 dBFS) appended. Prevents
+   F5's duration heuristic from leaking reference syllables into short generations.
+   Disable via `MOODSCAPE_F5_REF_PAD=0`.
+3. **Whisper-verified transcript** — ref_text is auto-transcribed by Whisper (via
+   F5's `preprocess_ref_audio_text`) to guarantee alignment with the clipped audio.
+
+Post-synthesis, each chunk is processed:
+1. **Trailing silence trim** — samples below -45 dBFS at the end are cut (50ms
+   decay tail preserved).
+2. **Silero VAD** — crops trailing non-speech, attenuates interior gaps to 15%.
+   Falls back gracefully if VAD is unavailable.
+3. **Short-phrase pacing** — chunks with ≤12 non-space characters use speed 0.5
+   to prevent reference leakage on tiny fragments.
+
+F5 text is normalized before synthesis via `core/f5_text.normalize_for_f5()`:
+colons→commas, ellipses→periods, dashes→commas, compound hyphens removed,
+ALL_CAPS lowered.
 
 ## Long-form quality control (opt-in)
 
@@ -298,7 +280,7 @@ roughly doubles a job's wall-clock, so it's off by default.
 - **Speaker similarity (SIM)** — embed the reference clip and the master's windows
   with `resemblyzer`; windows whose cosine similarity falls below
   `QC_SIM_THRESHOLD` are flagged (drift that develops late in a story surfaces
-  here). Runs only when exactly one cloned voice (f5/cosyvoice) is in play — sleep
+  here). Runs only when exactly one cloned voice (f5) is in play — sleep
   stories always qualify; a podcast does when it uses a single distinct cloned voice.
 
 Results land in `GenerateResult.qc` (`QCReport`: `wer`, `transcript`, `sim_mean`,
@@ -315,8 +297,8 @@ upload — mono downmix, resample to `REFERENCE_CLIP_SAMPLE_RATE`, energy-based
 silence trim, optional `noisereduce` denoise, length cap — then
 `reference_voice_registry.save()` writes it into the existing
 `assets/speakers/reference_audio/<slug>.wav` + `reference_text/<slug>.txt` layout.
-Because F5 and CosyVoice3 already discover voices by scanning that layout, the new
-clip appears in both with **no provider changes**. A transcript is required (the
+Because F5 discovers voices by scanning that layout, the new clip appears
+with **no provider changes**. A transcript is required (the
 cloners condition on it); when omitted, the route reuses the Phase 2 local Whisper
 (`qc.transcribe`) and returns a clear 422 if no Whisper backend is installed. The
 baseline hygiene uses only pydub (a base dep), so upload works out of the box;
@@ -378,7 +360,7 @@ Each turn becomes an ordered list of `Speech`/`Pause` items:
   otherwise it's rewritten to a short `[pause:N]` so the beat lands and no model
   speaks the literal tag. No current provider sets the flag → short-pause mapping;
 - a **leading tone tag** (`[excited]`/`[calm]`/`[soothing]`/`[reflective]`/`[warm]`/
-  `[sad]`/`[whispering]`/`[neutral]`) lifted off the text and attached as `emotion`
+  `[sad]`/`[whispering]`/`[neutral]`/`[dreamy]`/`[tender]`) lifted off the text and attached as `emotion`
   (stripped before synthesis; any other `[...]` passes through unchanged);
 - byte-budget splitting still delegated to `chunker.chunk_text`.
 
@@ -394,14 +376,54 @@ no emotion).
 ## Sleep-story pipeline (the sanctioned processing exception)
 
 For `kind: "sleep_story"` the orchestrator: spells standalone numbers to words
-(`sleep_text.spell_numbers`) → sentence-chunks the prose → synthesizes each chunk
-with a **per-chunk ramped** `speed`/continuity (see below) → inserts a ramped
-`pause_ms` silence between sentences → concats to a raw narration WAV →
-`sleep_post.process` (ffmpeg: `acompressor` → `lowpass` → `loudnorm` EBU R128 at
-−18 LUFS / −2 dBTP → `afade` in/out → 44.1 kHz **stereo**) → if an ambient bed is
-chosen, `ambient.mix` loops/trims the bed to length, pulls it ~22 dB under the
-voice, fades it, and `amix`es it under the narration → exports WAV + MP3. None of
-this touches the podcast path.
+(`sleep_text.spell_numbers`, leaving `[pause:N]` durations as digits) →
+**inserts pause markers after punctuation** (Kokoro only:
+`sleep_text.punctuation_to_pauses` keeps commas/ellipses/semicolons/dashes in the
+text for prosodic cues and inserts `[pause:N]` markers *after* each mark —
+commas→80 ms, ellipses→350 ms, semicolons→200 ms, dashes→250 ms — since Kokoro
+ignores punctuation for pausing; also adds `[pause:400]` at paragraph breaks;
+durations configurable via `kokoro_pause_*`) →
+sentence-chunks the prose → synthesizes each chunk with a **per-chunk ramped**
+`speed`/continuity (see below) and a default calm tone (see below) → inserts a
+ramped `pause_ms` silence between sentences and honors author `[pause:N]` breaths
+(see below) → concats to a raw narration WAV → `sleep_post.process` (ffmpeg:
+`acompressor` → `lowpass` → `loudnorm` EBU R128 at −18 LUFS / −2 dBTP → `afade`
+in/out → 44.1 kHz **stereo**) → if an ambient bed is chosen, `ambient.mix` softens
+and floats the bed under the voice (see below) → exports WAV + MP3. None of this
+touches the podcast path.
+
+**Engine tuning (ElevenLabs).** Both generations are first-class for sleep and
+selectable in the UI. **v3** runs at **Natural** stability
+(`elevenlabs_sleep_v3_stability`, default 0.5) — *not* Robust — so the calming
+inline tags (`[calm]`, `[warmly]`) stay responsive. **v2** keeps its numeric
+profile, cross-chunk continuity, seed, and best-in-class text normalization. A
+**default calm tone** (`sleep_default_tone`, default `soothing`) is injected for
+every chunk that doesn't already open with an author-placed tag, so even untagged
+prose lands in a calm register (v3 → an inline `[calm]`; v2 → the matching numeric
+profile). A **leading author tone tag** that names a known emotion (`[calm] …`,
+`[warm] …`) is extracted by `_sleep_tone` and applied as the segment's emotion on
+**both** engines — v3 performs the mapped inline tag, v2 (which can't perform tags)
+maps it to a warmer numeric profile — then removed from the text so it is never
+spoken or double-tagged. A leading non-emotion cue (`[sighs]`) stays inline for v3.
+
+**Deliberate breaths (`[pause:N]`).** Authors can place `[pause:800]` /
+`[pause:800ms]` markers. On **ElevenLabs v2** the provider rewrites them to native
+`<break time>` tags (model-aware prosody, capped at the API's 3 s;
+`elevenlabs_v2_native_breaks`). On **v3 and the local engines** (which have no
+break tags) the orchestrator splits the chunk on the marker and splices real
+silence via `sleep_text.split_pauses` (clamped to `sleep_pause_marker_max_ms`).
+These stack on top of the inter-sentence + ramp pauses.
+
+**Ambient bed ("light and slow").** `ambient.build_looped_bed` extends the bed to
+the narration length with a **crossfaded seam** (`ambient_loop_crossfade_s`) so
+loop points don't click; `ambient.mix` then **loudness-normalizes** the bed to a
+consistent level (`ambient_bed_target_lufs`, default −24 LUFS) so different ambient
+files sit at the same perceived volume regardless of source level, **band-limits**
+it (`ambient_bed_highpass_hz` / `ambient_bed_lowpass_hz`) so it sits dark and soft
+behind the voice, pulls it ~18 dB under (`ambient_bed_gain_db`), fades it, and —
+when `ambient_duck` is on — **sidechain-ducks** it under the voice
+(`sidechaincompress` keyed off the narration) so it dips while the narrator speaks
+and breathes back up in the gaps.
 
 **Progressive ramp-down** (`SleepStoryRequest.ramp`, default on, `_sleep_ramp`):
 per chunk, `speed` eases linearly from the baseline to

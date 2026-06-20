@@ -21,7 +21,9 @@ Pick by **content type** and **TTS model**:
 
 | Your model | Use this guide | Why it differs |
 | --- | --- | --- |
-| **ElevenLabs** (cloud) | [`elevenlabs_sleep.md`](elevenlabs_sleep.md) | Calming prose for single-narrator sleep stories. Tone tags (`[soothing]`, `[calm]`) genuinely shift the voice. Guidance on rhythm, imagery, and progressive winding down. |
+| **ElevenLabs** (cloud) | [`elevenlabs_sleep.md`](elevenlabs_sleep.md) | Calming prose for single-narrator sleep stories. Tone tags (`[calm]`, `[warm]`) genuinely shift the voice; `[pause:N]` renders a real breath (native `<break>` on v2, inserted silence on v3). Engine branch (v3 expressive / v2 most reliable), plus guidance on rhythm, imagery, and progressive winding down. |
+| **Kokoro** (local, built-in voices) | [`kokoro_sleep.md`](kokoro_sleep.md) | Fixed-character voices; emotion lives in the words, not tags. Punctuation and `[pause:N]` are the primary pacing tools. Tone tags nudge speed only. Guidance on rhythm, sensory writing, and progressive calm for sleep. |
+| **F5** (local, voice cloning) | [`f5_sleep.md`](f5_sleep.md) | Voice cloned from a reference clip; emotion anchored to the reference. Shortest sentence budget (under ~15 words). Only periods/commas produce reliable pauses — colons, ellipses, dashes are normalized away. `[pause:N]` is the primary pacing tool. No compound hyphens, no ALL CAPS. |
 | **Other models** | No dedicated guide yet | Write plain, gentle prose. The app's sleep post-processing (loudness normalization, compression, fades) does the heavy lifting regardless of model. |
 
 ### Mixing models across speakers (podcasts only)
@@ -50,9 +52,10 @@ advice and which tags do something audible. The format the app parses:
 - **Inline tags** (all optional, all handled by the app regardless of model):
   - `[pause:600]` or `[pause:600ms]` — insert a silence of that many milliseconds
     at that exact spot in the turn.
-  - `[excited]` `[calm]` `[sad]` `[whispering]` `[neutral]` — set the tone for the
-    rest of that turn (or until the next `[pause:N]`). **Only recognized at the
-    very start of a turn or immediately after a `[pause:N]`** — never mid-sentence.
+  - `[excited]` `[calm]` `[sad]` `[whispering]` `[neutral]` `[soothing]`
+    `[reflective]` `[warm]` `[dreamy]` `[tender]` — set the tone for the rest of
+    that turn (or until the next `[pause:N]`). **Only recognized at the very start
+    of a turn or immediately after a `[pause:N]`** — never mid-sentence.
   - Any **other** bracketed text (e.g. `[laughs]`, `[sighs]`) is **not** understood
     by the app and is passed through to the model untouched. On most models that
     means it's read aloud literally — so the guides avoid inventing tags. The one

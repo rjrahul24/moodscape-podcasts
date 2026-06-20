@@ -3,6 +3,173 @@
 Append-only log of notable changes and the decisions behind them. Newest first.
 Every change should add an entry (see `CLAUDE.md` → Documentation discipline).
 
+## 2026-06-20 — F5 sleep story quality improvement
+
+**What changed:**
+- F5 reference audio is now conditioned at load time: RMS-normalized to -20 dBFS
+  and padded with ~1s trailing noise at -55 dBFS. This prevents F5's duration
+  heuristic from leaking reference syllables into generated output.
+- Reference transcripts are now Whisper-verified (auto-transcribed from the clipped
+  audio) instead of read from .txt files, eliminating ref_text/audio misalignment.
+- Post-synthesis: trailing silence trimming (-45 dBFS threshold, 50ms decay tail)
+  and Silero VAD (crop trailing non-speech, attenuate interior gaps to 15%).
+- Short-phrase pacing: chunks with ≤12 non-space characters use speed 0.5 to
+  prevent reference leakage on tiny fragments like "Breathe in."
+- New `core/f5_text.py` module normalizes text for F5's G2P: colons→commas,
+  ellipses→periods, dashes→commas, compound hyphens removed, ALL_CAPS lowered.
+- Orchestrator wires F5 normalization into both sleep and podcast paths.
+- F5 sleep stories now use nfe_step=32 (vs 16 for podcasts) and speed=0.88
+  (~95-100 WPM meditation pace) as defaults.
+- New `docs/prompting_guides/f5_sleep.md` — dedicated LLM prompting guide for
+  writing F5 sleep story prose.
+- Added `scipy` as a dependency (for Silero VAD gaussian smoothing).
+
+**Why:** F5 sleep stories had three issues: reference text leaking into output
+(no duration predictor workaround), poor quality (no text normalization, no
+post-processing, nfe_step too low), and slow rendering (reference preprocessing
+per-call). All fixes ported from the meditation reference project's battle-tested
+F5 engine.
+
+**Trade-offs:** Silero VAD adds ~0.5s per chunk but significantly improves output
+cleanliness. nfe_step=32 doubles inference time per chunk vs 16, but sleep stories
+prioritize quality over speed. scipy added as a base dependency (~30MB).
+
+## 2026-06-20 — Remove CosyVoice3 provider
+
+Removed the CosyVoice3 (MLX) Apple-Silicon-only provider entirely: provider
+implementation, config settings, the `mlx` optional-dependency group, benchmark
+script, design spec, Instruct Mode plumbing (`accepts_instruct` capability flag,
+`_sleep_voice_settings` instruct branch), frontend Delivery style field, and all
+documentation references. Three providers remain: ElevenLabs, Kokoro, F5.
+
+## 2026-06-20 — Phase 10c: Fix punctuation-to-pause quality regression
+
+The Phase 10b conversion removed punctuation from the text, stripping prosodic
+cues Kokoro uses for intonation contour even though it doesn't audibly pause.
+This caused flat voice, too-long comma pauses, and voice drift at boundaries.
+
+- **Keep punctuation, insert pauses after it.** `punctuation_to_pauses()` now
+  inserts `[pause:N]` markers *after* each punctuation mark instead of replacing
+  it. Kokoro gets `"cool, "` (with the comma for prosody) then silence, then the
+  next fragment — instead of `"cool "` (comma stripped, no prosodic anchor).
+  (`sleep_text.py`)
+- **Reduced comma pause.** 150 ms → **80 ms** — a subtle micro-breath, not a
+  full gap. (`config.py` `kokoro_pause_comma_ms`)
+
+## 2026-06-20 — Phase 10b: Kokoro punctuation-to-pause conversion
+
+Kokoro TTS ignores punctuation marks entirely for pausing — commas, ellipses,
+semicolons, and dashes produce no audible gap. The previous `enhance_pacing()`
+approach (inserting more commas/ellipses) was ineffective.
+
+- **Punctuation-to-pause conversion.** Replaced `enhance_pacing()` with
+  `punctuation_to_pauses()` in `sleep_text.py`. For Kokoro sleep stories only,
+  commas → `[pause:150]`, ellipses → `[pause:350]`, semicolons → `[pause:200]`,
+  dashes → `[pause:250]`, paragraph breaks → `[pause:400]`. Periods left intact
+  (chunker handles sentence boundaries). The orchestrator's existing
+  `split_pauses` machinery splices real silence at each marker.
+  (`sleep_text.py`, `orchestrator.py`, `config.py` `kokoro_pause_*`)
+- **Gated to Kokoro only.** Other providers (ElevenLabs, F5) handle
+  punctuation natively and get unmodified text.
+- **Updated prompting guide.** `kokoro_sleep.md` now explains that punctuation is
+  automatically converted to pauses — authors write with natural commas/ellipses
+  and the app handles the rest.
+
+## 2026-06-20 — Phase 10: Kokoro sleep quality refinement (8/10 → 10/10)
+
+Targeted refinements to Kokoro TTS sleep story quality across four areas:
+
+- **Wider inter-sentence gaps.** `sleep_default_pause_ms` 900 → **1050** ms. With
+  the ramp, pauses now reach ~1680 ms by the story's end (was 1440). A subtle
+  increase that gives the listener more breathing room without breaking flow.
+  (`config.py`)
+- **Automated pacing enhancement.** New `sleep_text.enhance_pacing()` inserts
+  commas at long unpunctuated clause boundaries (>80 chars), converts ~25 % of
+  paragraph-internal periods to ellipses for a driftier rhythm, and adds
+  `[pause:400]` at paragraph breaks. Deterministic (seeded RNG). Runs after
+  `spell_numbers()`, before chunking — sleep stories only, never podcasts.
+  (`sleep_text.py`, `orchestrator.py`)
+- **Consistent ambient bed volume.** Added EBU R128 loudness normalization
+  (`loudnorm I=-24 LUFS`) to the ambient bed filter chain *before* band-limiting
+  and gain reduction. Different ambient files now start at the same perceived
+  level, so the `-18 dB` pull-down produces consistent results regardless of
+  source material. (`ambient.py`, `config.py` `ambient_bed_target_lufs`)
+- **New sleep emotion tags.** Added `dreamy` (0.90× speed) and `tender` (0.96×)
+  to the shared emotion vocabulary, with matching ElevenLabs v2 profiles and v3
+  inline tags. Gives script-writers finer pacing control for different story
+  moments. (`emotion.py`, `elevenlabs_provider.py`)
+- **Kokoro sleep prompting guide.** New `docs/prompting_guides/kokoro_sleep.md` —
+  comprehensive guide for writing Kokoro sleep stories: punctuation-based pacing
+  toolkit, `[pause:N]` usage with recommended durations, tone tag reference,
+  techniques for writing emotion into words (sensory imagery, repetition-as-rhythm,
+  progressive relaxation), story structure guidance, and a worked example.
+  (`kokoro_sleep.md`, `README.md`)
+
+## 2026-06-20 — Phase 9: Sleep tuning — slower pace, expressive v2, audible bed
+
+Follow-up to Phase 8 from listening feedback:
+
+- **Slower default delivery.** `sleep_default_speed` 0.85 → **0.78** (ElevenLabs
+  honours 0.7–1.2; this leans toward the slow floor) and the frontend Speed default
+  matches. The rewritten prompting guide adds a **"Pacing the voice"** section:
+  punctuation- and rhythm-based techniques (short sentences, generous commas,
+  ellipses, one image per sentence, no run-ons) that genuinely slow the read — the
+  biggest lever for a *calm* feel, since speed alone sounds dragged if pushed too far.
+  (`config.py`, `App.tsx`, `elevenlabs_sleep.md`)
+- **Expressive, drift-free v2.** For users seeing v3 voice drift, the guide now
+  recommends v2 for long stories and adds a **"Writing for v2"** section (emotion via
+  words/rhythm, since v2 can't perform inline cues). Code: the `soothing` default tone
+  profile gets more `style` (0.08 → 0.22) for warmth (`warm`/`reflective` are shared
+  with podcast v2, so they're unchanged); a **leading author tone tag**
+  (`[calm]`/`[warm]`) is now extracted and honored on
+  *both* engines — v3 performs it, v2 maps it to a warmer numeric profile — and
+  stripped from the text so it's never spoken or double-tagged. (`orchestrator.py`
+  `_sleep_tone`, `elevenlabs_provider.py`)
+- **Audible ambient bed.** `ambient_bed_gain_db` -22 → **-18** and the duck softened
+  (`ambient_duck_ratio` 4 → 2, threshold -30 → -28) so the near-continuous narration
+  no longer keeps the bed ducked into inaudibility. Still low and behind the voice,
+  just present. (`config.py`)
+
+## 2026-06-20 — Phase 8: Perfecting ElevenLabs sleep stories
+
+Focused pass to make ElevenLabs sleep-story generation the best version possible:
+expressive-yet-calm narration, author-controlled breaths, and a soft, slow music
+bed. Research (ElevenLabs audiobook/best-practice docs + v3-vs-v2 comparisons)
+surfaced an internal contradiction and a dead documented feature.
+
+- **v3 sleep stability: Robust → Natural.** Sleep ran v3 at Robust (1.0), which
+  largely *ignores* the inline audio tags that are the whole reason to use v3.
+  Switched to Natural (0.5, `elevenlabs_sleep_v3_stability`) so `[calm]`/`[warmly]`
+  actually shape delivery while staying steady. Both engines are now well-tuned and
+  selectable (v3 expressive default; v2 most reliable for long stories — native
+  breaks, best normalization, continuity). (`elevenlabs_provider.py`, `config.py`)
+- **Default calm tone injection.** A configurable `sleep_default_tone` (default
+  `soothing`) is applied to every sleep chunk that doesn't already open with an
+  author tag, so untagged prose still lands calm (v3 → inline `[calm]`; v2 → numeric
+  profile). Reconciled the v2 `soothing` profile to warm-steady (`stability 0.72`),
+  not over-stabilized. (`orchestrator.py`, `elevenlabs_provider.py`)
+- **`[pause:N]` is now real.** The guide documented `[pause:800]` but the code
+  dropped it (v2 stripped it; v3 sent the literal unrecognized tag). Now: v2
+  rewrites it to a native `<break time>` (capped at the API's 3 s); v3/local split
+  on it and splice real silence (`sleep_text.split_pauses`,
+  `sleep_pause_marker_max_ms`). Number-spelling was taught to leave the marker's
+  digits alone. (`sleep_text.py`, `orchestrator.py`, `elevenlabs_provider.py`)
+- **"Light and slow" ambient bed.** The bed is now band-limited
+  (high-pass + low-pass) so it sits softly behind the voice, looped with a
+  crossfaded seam (`build_looped_bed`) so loop points don't click, and optionally
+  sidechain-**ducked** under the narration so it dips while the voice speaks. New
+  `ambient_*` knobs. (`ambient.py`, `config.py`, `orchestrator.py`)
+- **Prompting guide rewrite.** Added a role/system frame and an explicit v2/v3
+  engine branch; corrected the tag vocabulary to tags v3 actually performs
+  (`[calm]`, `[warm]`, `[sighs]`/`[exhales]` — dropped the non-native `[soothing]`
+  inline recommendation); documented `[pause:N]` accurately; added the
+  ellipsis/dash micro-pause technique (the only in-line pause on v3).
+  (`docs/prompting_guides/elevenlabs_sleep.md`, design spec under `specs/`)
+
+Trade-offs: Natural v3 is slightly less locked-down than Robust, but the ramp-down
++ default calm tone + mastering keep it steady; v2 remains the pick for maximum
+long-form consistency. Ducking and native breaks are config-gated (default on).
+
 ## 2026-06-20 — Phase 7: ElevenLabs podcast quality — v3 continuity, PCM intermediates, tuning
 
 Addressed voice drift, irregular pronunciations, mid-sentence tone changes, and
