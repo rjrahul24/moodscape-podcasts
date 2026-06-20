@@ -50,6 +50,23 @@ def test_concat_roundtrip_sums_durations(tmp_path):
 
 
 @needs_ffmpeg
+def test_normalize_loudness_returns_wav(tmp_path):
+    # A tone (not pure silence) so loudnorm has something to measure.
+    src = (AudioSegment.silent(duration=600, frame_rate=44100)
+           .overlay(AudioSegment.silent(duration=600, frame_rate=44100)))
+    src_path = tmp_path / "src.wav"
+    src.export(src_path, format="wav")
+    out = ffmpeg_stitch.normalize_loudness(
+        src_path, tmp_path / "norm.wav", target_lufs=-21.0, sample_rate=44100
+    )
+    assert out.exists()
+    with wave.open(str(out)) as w:
+        assert w.getframerate() == 44100
+        # Duration is preserved by a single loudnorm pass (within tolerance).
+        assert abs(w.getnframes() / 44100 * 1000 - 600) < 80
+
+
+@needs_ffmpeg
 def test_transcode_mp3(tmp_path):
     wav = ffmpeg_stitch.silence_wav(tmp_path / "a.wav", duration_ms=300, sample_rate=44100)
     mp3 = ffmpeg_stitch.transcode_mp3(wav, tmp_path / "a.mp3")

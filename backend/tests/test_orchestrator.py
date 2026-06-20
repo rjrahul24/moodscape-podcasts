@@ -264,6 +264,25 @@ def test_sleep_v3_splices_pause_marker_into_silence(settings, clean_registry):
 
 
 @needs_ffmpeg
+def test_sleep_v3_splices_bare_pause_into_silence(settings, clean_registry):
+    """A bare [pause] (no duration) should also splice silence for v3."""
+    el = FakeProvider(name="elevenlabs", has_native_speed=True)
+    registry.register(el)
+    req = SleepStoryRequest(
+        prose_text="The lake is still. [pause] Sleep now.",
+        provider="elevenlabs",
+        voice_id="rachel",
+        model_id="eleven_v3",
+        ramp=False,
+    )
+    orchestrator.run(req, settings, job_id="jobv3bare")
+    texts = [c["text"] for c in el.synth_calls]
+    assert all("pause" not in t.lower() for t in texts)
+    assert any("The lake is still." in t for t in texts)
+    assert any("Sleep now." in t for t in texts)
+
+
+@needs_ffmpeg
 def test_sleep_leading_tone_tag_becomes_emotion_and_is_stripped(settings, clean_registry):
     el = FakeProvider(name="elevenlabs", has_native_speed=True)
     registry.register(el)
@@ -318,6 +337,41 @@ def test_podcast_passes_content_type_and_model_to_elevenlabs(settings, clean_reg
         assert vs["emotion"] == "calm"
         assert vs["speed"] == 1.0  # fixed base speed for cloud providers (no jitter)
         assert "[calm]" not in c["text"]  # tag stripped by the planner
+
+
+@needs_ffmpeg
+def test_sleep_preroll_prepends_silence_when_ambient_bed_set(tmp_path, clean_registry):
+    """With an ambient bed selected, a pre-roll silence is prepended so the bed
+    plays alone before the narration starts."""
+    import wave
+
+    fake = FakeProvider(name="fake")
+    clean_registry.register(fake)
+
+    ambient_dir = tmp_path / "ambient"
+    ambient_dir.mkdir()
+    from pydub import AudioSegment
+
+    AudioSegment.silent(duration=5000, frame_rate=44100).export(
+        ambient_dir / "rain.wav", format="wav"
+    )
+
+    settings = Settings(
+        output_dir=str(tmp_path / "out"),
+        also_export_mp3=False,
+        ambient_dir=ambient_dir,
+        sleep_preroll_s=3.0,
+    )
+    req = SleepStoryRequest(
+        prose_text="The night is calm.",
+        provider="fake",
+        voice_id="v",
+        ambient_bed="rain",
+        pause_ms=0,
+    )
+    result = orchestrator.run(req, settings, job_id="jobpreroll")
+    # Duration should include the 3-second pre-roll (3000 ms).
+    assert result.duration_ms >= 3000
 
 
 def test_sleep_unknown_ambient_bed_raises(settings, fake):
@@ -408,6 +462,75 @@ def test_sleep_numbers_are_spelled_before_synthesis(settings, fake):
     orchestrator.run(req, settings, job_id="jobnum")
     assert any("three" in c["text"] for c in fake.synth_calls)
     assert all("3" not in c["text"] for c in fake.synth_calls)
+
+
+@needs_ffmpeg
+def test_sleep_ellipsis_injected_for_elevenlabs_when_enabled(tmp_path, clean_registry):
+    el = FakeProvider(name="elevenlabs", has_native_speed=True)
+    clean_registry.register(el)
+    settings = Settings(
+        output_dir=str(tmp_path), also_export_mp3=False,
+        sleep_sentence_ellipsis=True,
+    )
+    req = SleepStoryRequest(
+        prose_text="The night was calm. Sleep came softly.",
+        provider="elevenlabs", voice_id="rachel", model_id="eleven_v3", pause_ms=0,
+    )
+    orchestrator.run(req, settings, job_id="jobell")
+    assert any("…" in c["text"] for c in el.synth_calls)
+
+
+@needs_ffmpeg
+def test_sleep_ellipsis_off_by_default(settings, clean_registry):
+    el = FakeProvider(name="elevenlabs", has_native_speed=True)
+    clean_registry.register(el)
+    req = SleepStoryRequest(
+        prose_text="The night was calm. Sleep came softly.",
+        provider="elevenlabs", voice_id="rachel", model_id="eleven_v3", pause_ms=0,
+    )
+    orchestrator.run(req, settings, job_id="jobnoell")
+    assert all("…" not in c["text"] for c in el.synth_calls)
+
+
+@needs_ffmpeg
+def test_sleep_per_chunk_normalization_runs_for_long_chunks(tmp_path, clean_registry, monkeypatch):
+    # Chunk longer than the guard so normalization fires; spy on the helper.
+    el = FakeProvider(name="elevenlabs", duration_ms=500, has_native_speed=True)
+    clean_registry.register(el)
+    calls: list[tuple] = []
+    real = orchestrator.ffmpeg_stitch.normalize_loudness
+
+    def spy(in_wav, out_wav, **kw):
+        calls.append((in_wav, out_wav, kw))
+        return real(in_wav, out_wav, **kw)
+
+    monkeypatch.setattr(orchestrator.ffmpeg_stitch, "normalize_loudness", spy)
+    settings = Settings(output_dir=str(tmp_path), also_export_mp3=False)
+    req = SleepStoryRequest(
+        prose_text="The lake is still.", provider="elevenlabs",
+        voice_id="rachel", model_id="eleven_v3", pause_ms=0,
+    )
+    orchestrator.run(req, settings, job_id="jobnorm")
+    assert calls, "normalize_loudness should run for >=400ms chunks"
+    assert all(kw["target_lufs"] == settings.sleep_chunk_norm_lufs for _, _, kw in calls)
+
+
+@needs_ffmpeg
+def test_sleep_per_chunk_normalization_skips_short_chunks(tmp_path, clean_registry, monkeypatch):
+    el = FakeProvider(name="elevenlabs", duration_ms=200, has_native_speed=True)
+    clean_registry.register(el)
+    calls: list = []
+    monkeypatch.setattr(
+        orchestrator.ffmpeg_stitch, "normalize_loudness",
+        lambda *a, **k: calls.append(a) or a[1],
+    )
+    settings = Settings(output_dir=str(tmp_path), also_export_mp3=False)
+    req = SleepStoryRequest(
+        prose_text="The lake is still.", provider="elevenlabs",
+        voice_id="rachel", model_id="eleven_v3", pause_ms=0,
+    )
+    orchestrator.run(req, settings, job_id="jobshort")
+    assert not calls, "chunks under the min-ms guard must skip normalization"
 
 
 # ── F5 text normalization + sleep settings ─────────────────────────────────────

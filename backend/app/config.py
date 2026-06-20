@@ -58,14 +58,24 @@ class Settings(BaseSettings):
     # while staying steady — Robust (1.0) is more consistent but largely ignores
     # the tags, defeating the reason to run v3 for an expressive-but-calm read.
     elevenlabs_sleep_v3_stability: float = 0.5
+    # Optional v3 sleep pacing tag, *reasserted on every chunk*. v3 tends to drift
+    # from a calm bedtime register toward an "audiobook narrator" read over a long
+    # story; prepending a pacing tag (e.g. "[slowly]") to each chunk holds the slow
+    # register to the end. Empty string = disabled (today's behaviour); applies
+    # only to sleep + v3, landing after the emotion tag (e.g. "[calm][slowly] …").
+    elevenlabs_sleep_v3_pacing_tag: str = ""
     # On v2, translate author-placed [pause:N] markers into native <break time>
     # tags so ElevenLabs renders the breath with model-aware prosody (smoother
     # than a spliced silence). v3 has no break tags, so it always splices.
     elevenlabs_v2_native_breaks: bool = True
-    # Per-provider intermediate format: higher bitrate than the global default
-    # reduces quality loss when chunks are decoded then re-encoded for the final
-    # master. pcm_44100 is ideal but requires ElevenLabs Pro; mp3_44100_192 is
-    # the best universally available option.
+    # Per-provider intermediate format. Chunks are decoded then re-encoded for the
+    # final master, so a higher-quality intermediate reduces loss *before*
+    # mastering. ElevenLabs gates formats by plan tier:
+    #   • mp3_44100_192 — Creator tier and up; the default (best non-PCM option).
+    #   • pcm_44100      — lossless, but **Pro tier and up only** (the API rejects
+    #                      it on lower tiers). On Pro, set this for a truly lossless
+    #                      intermediate (matches sleep_sample_rate, no resample);
+    #                      bytes_to_segment already decodes raw pcm_*.
     elevenlabs_segment_format: str = "mp3_44100_192"
 
     # Providers
@@ -112,22 +122,30 @@ class Settings(BaseSettings):
     kokoro_pause_dash_ms: int = 250
     kokoro_pause_paragraph_ms: int = 400
 
-    # F5. On Apple Silicon, float16-on-MPS is the documented cause of garbled
-    # output and MPS-unsupported ops bounce to CPU — so the default runtime is
-    # CPU + float32 (reliable, matches Kokoro). ``f5_device="auto"`` resolves to
-    # CUDA if present, else CPU; set it to "mps" explicitly if the benchmark
-    # (scripts/bench_f5.py) shows MPS wins on this machine. nfe_step=16 (was 32)
-    # roughly halves inference time at comparable quality with sway sampling.
+    # F5. ``f5_device="auto"`` resolves to CUDA > MPS > CPU. On Apple Silicon
+    # this lands on MPS (~1.6x faster than CPU here); float16 is auto-selected
+    # for MPS at model-load time (~8% on top), explicit ``f5_dtype="float32"``
+    # overrides. The dominant cost is ``nfe_step`` — F5 runtime scales ~linearly
+    # with it (measured MPS+fp16: nfe=32 → RTF 5.3, nfe=16 → 2.4, nfe=12 → 1.8).
+    # With sway sampling, 16 is the quality/speed sweet spot (the reference
+    # meditation project uses 16 as its working default, 32 only for final).
     f5_speed: float = 1.0
     f5_device: str = "auto"  # auto | cpu | mps | cuda
     f5_dtype: str = "float32"  # float32 | float16
     f5_nfe_step: int = 16
     f5_cfg_strength: float = 2.0
     f5_sway_coef: float = -1.0
-    # F5 sleep story overrides. Sleep stories prioritize quality over speed, so
-    # nfe_step defaults higher (32 vs 16 for podcasts) and speed starts at a
-    # calm meditation pace (~95-100 WPM) before the ramp eases it further.
-    f5_sleep_nfe_step: int = 32
+    # F5 recomputes the *reference + generated* sequence on every chunk, so the
+    # reference clip length is a direct, per-chunk runtime multiplier. Clipping
+    # to ~8s (F5 needs only a few seconds to clone a voice) cuts ~30-40% off each
+    # chunk vs the ~12s F5 preprocess default, with no audible clone-fidelity
+    # loss. Applied in _condition_reference_audio before the anti-leak pad.
+    f5_ref_clip_seconds: float = 8.0
+    # F5 sleep story override. nfe=16 (was 32) keeps sway-sampled quality while
+    # roughly halving render time; combined with the 8s reference clip a 10-min
+    # story renders in ~14 min (RTF ~1.4) instead of ~53 min (RTF ~5.3). Speed
+    # starts at a calm meditation pace (~95-100 WPM) before the ramp eases it.
+    f5_sleep_nfe_step: int = 16
     f5_sleep_speed: float = 0.88
 
     # Per-provider chunk budgets (characters). Long text is split into bounded
@@ -151,6 +169,22 @@ class Settings(BaseSettings):
     # Author-placed [pause:N] breaths are clamped to this ceiling (ms) on every
     # engine (the v2 native <break> tag is additionally clamped to 3 s by the API).
     sleep_pause_marker_max_ms: int = 5000
+    # Default duration for a bare [pause] tag with no explicit ms value.
+    sleep_pause_default_ms: int = 1000
+    # Per-chunk loudness normalization *before* stitching. v3 drifts in loudness
+    # between chunks under any settings; a single end-of-pipeline loudnorm can't
+    # undo level jumps baked into the stitched track. Normalizing each chunk to a
+    # common target first evens the drift out; the final master (sleep_target_lufs)
+    # then sets the absolute level. Target sits above the master so the master
+    # loudnorm doesn't fight it. Chunks shorter than the guard are skipped so
+    # near-silent fragments aren't amplified.
+    sleep_chunk_normalize: bool = True
+    sleep_chunk_norm_lufs: float = -21.0
+    sleep_chunk_norm_min_ms: int = 400
+    # Inject an ellipsis ("…") at sentence boundaries that lack one, giving the
+    # narrator a soft breathing pause at each break. Off by default (today's
+    # behaviour); applies only to ElevenLabs sleep (both v2 and v3 honour "…").
+    sleep_sentence_ellipsis: bool = False
     sleep_sample_rate: int = 44100
     sleep_channels: int = 2  # sleep masters are stereo
     sleep_target_lufs: float = -18.0  # EBU R128 integrated loudness target (calm but audible)
@@ -158,6 +192,10 @@ class Settings(BaseSettings):
     sleep_lowpass_hz: int = 8000  # gentle high-frequency roll-off
     sleep_fade_in_s: float = 2.0
     sleep_fade_out_s: float = 5.0
+    # Seconds of ambient-bed-only playback before the narration starts. Gives
+    # listeners a gentle entry instead of an abrupt first word. Only applies
+    # when an ambient bed is selected; 0 = disabled.
+    sleep_preroll_s: float = 3.0
     # Progressive "ramp-down": the story gently decelerates toward sleep onset.
     # Per-chunk speed eases from the baseline to baseline*end_factor, and the
     # inter-sentence pause grows up to pause_scale×, both interpolated over the

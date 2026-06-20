@@ -1,7 +1,7 @@
 """Reference-clip hygiene for voice cloning.
 
 When a user uploads a short clip to clone, the raw recording often carries room
-noise, fan hum, and dead air at the head/tail. The cloners (F5, CosyVoice3) copy
+noise, fan hum, and dead air at the head/tail. The cloner (F5) copies
 whatever they're given, so a noisy clip yields a noisy voice. This module cleans an
 uploaded clip before it lands in the reference-voice registry.
 

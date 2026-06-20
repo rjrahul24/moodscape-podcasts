@@ -5,17 +5,16 @@ measures it. This script does: for each local provider it builds increasingly lo
 narration, chunks it exactly like the orchestrator, synthesizes every chunk, and
 reports wall-clock, real-time factor (RTF), and peak resident memory (RSS).
 
-Watch for two things the research warns about:
+Watch for two things:
   * RTF should stay < 1.0 (faster than real time) and not creep upward as length
-    grows — a rising RTF means the MLX buffer cache is ballooning toward SSD swap
-    (cap it with ``MLX_CACHE_MB`` / ``Settings.mlx_cache_mb``).
+    grows.
   * Peak RSS should plateau, not track audio length — disk-based stitching keeps
     the *output* off the heap, but the model + cache must stay bounded.
 
-Run from ``backend/`` (local-TTS deps; CosyVoice needs ``uv sync --extra mlx``):
+Run from ``backend/``:
 
     uv run python scripts/bench_longform.py
-    uv run python scripts/bench_longform.py --providers cosyvoice f5 --minutes 30 60
+    uv run python scripts/bench_longform.py --providers f5 --minutes 30 60
     uv run python scripts/bench_longform.py --providers kokoro --minutes 5
 
 ElevenLabs is intentionally excluded — it's cloud, so this measures nothing local
@@ -35,7 +34,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.config import get_settings  # noqa: E402
 from app.core import chunker  # noqa: E402
-from app.providers.cosyvoice_provider import CosyVoiceProvider  # noqa: E402
 from app.providers.f5_provider import F5Provider  # noqa: E402
 from app.providers.kokoro_provider import KokoroProvider  # noqa: E402
 
@@ -81,19 +79,11 @@ def _make_provider(name: str, settings) -> object:
             cfg_strength=settings.f5_cfg_strength,
             sway_coef=settings.f5_sway_coef,
         )
-    if name == "cosyvoice":
-        return CosyVoiceProvider(
-            assets_dir=settings.assets_dir,
-            model=settings.cosyvoice_model,
-            cache_mb=settings.mlx_cache_mb,
-        )
     raise ValueError(f"unknown provider {name!r}")
 
 
 def _voice_settings(name: str, settings) -> dict | None:
     """Mirror the sleep-path settings the orchestrator would send each provider."""
-    if name == "cosyvoice":
-        return {"instruct": settings.cosyvoice_sleep_instruct}
     if name in ("kokoro", "f5"):
         return {"speed": settings.sleep_default_speed}
     return None
@@ -110,7 +100,6 @@ def _bench(name: str, minutes_list: list[float], settings) -> None:
     overrides = {
         "kokoro": settings.kokoro_chunk_chars,
         "f5": settings.f5_chunk_chars,
-        "cosyvoice": settings.cosyvoice_chunk_chars,
     }
     budget = chunker.budget_for(name, overrides=overrides)
 
@@ -145,7 +134,7 @@ def main() -> None:
     parser.add_argument(
         "--providers",
         nargs="+",
-        default=["kokoro", "f5", "cosyvoice"],
+        default=["kokoro", "f5"],
         help="local providers to benchmark",
     )
     parser.add_argument(

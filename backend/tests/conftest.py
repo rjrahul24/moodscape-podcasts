@@ -17,14 +17,12 @@ class FakeProvider(TTSProvider):
         *,
         consumes_local_speed: bool = False,
         has_native_speed: bool = False,
-        accepts_instruct: bool = False,
         accepts_inline_sfx: bool = False,
         accepts_continuity: bool = False,
     ):
         self.name = name
         self.consumes_local_speed = consumes_local_speed
         self.has_native_speed = has_native_speed
-        self.accepts_instruct = accepts_instruct
         self.accepts_inline_sfx = accepts_inline_sfx
         self.accepts_continuity = accepts_continuity
         self._duration_ms = duration_ms

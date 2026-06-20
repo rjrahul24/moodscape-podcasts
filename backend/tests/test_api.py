@@ -10,6 +10,7 @@ from app.config import Settings, get_settings
 from app.core.stitcher import numpy_to_segment
 from app.main import create_app
 from app.providers import registry
+from app.providers.bootstrap import bootstrap_providers
 
 from .conftest import FakeProvider
 
@@ -27,8 +28,11 @@ def client(tmp_path):
         also_export_mp3=False,
         inter_turn_gap_ms=100,
         assets_dir=tmp_path / "assets",
+        elevenlabs_api_key=None,
     )
     app.dependency_overrides[get_settings] = lambda: settings
+    registry.clear()
+    bootstrap_providers(settings)
     registry.register(FakeProvider())
     with TestClient(app) as test_client:
         yield test_client
@@ -116,12 +120,11 @@ def test_upload_reference_voice_with_transcript(client, tmp_path):
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["id"] == "calm_river"
-    assert "f5" in body["providers"] and "cosyvoice" in body["providers"]
+    assert "f5" in body["providers"]
     assert body["transcript"] == "the exact words spoken"
 
     # Persisted into the shared registry layout, so any cloning provider
-    # configured with this assets_dir lists it on its next scan. (The bootstrapped
-    # F5/CosyVoice instances scan their own assets_dir, which in the app matches.)
+    # configured with this assets_dir lists it on its next scan.
     from app.providers import reference_voice_registry as rvr
 
     assert "calm_river" in rvr.scan(tmp_path / "assets")

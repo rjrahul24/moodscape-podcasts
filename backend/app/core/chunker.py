@@ -27,7 +27,6 @@ from .models import ScriptTurn
 DEFAULT_BUDGETS: dict[str, int] = {
     "kokoro": 400,  # well under Kokoro's 510 phoneme-token cap, no "rushed" artifacts
     "f5": 250,  # ~18s of narration; stay well under F5's ~30s garble edge
-    "cosyvoice": 300,  # keep chunks under CosyVoice3's ~30s reference window
     "elevenlabs": 1000,  # quality sweet spot; >2000 chars causes pacing drift in EL models
 }
 

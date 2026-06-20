@@ -28,6 +28,8 @@ EMOTIONS: frozenset[str] = frozenset(
         "soothing",
         "reflective",
         "warm",
+        "dreamy",
+        "tender",
     }
 )
 
@@ -43,6 +45,8 @@ EMOTION_SPEED: dict[str, float] = {
     "soothing": 0.93,
     "reflective": 0.95,
     "warm": 0.97,
+    "dreamy": 0.90,
+    "tender": 0.96,
 }
 
 # Inline breath / SFX tags and the short silence each stands in for. These shape
