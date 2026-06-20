@@ -23,9 +23,11 @@ from pathlib import Path
 
 from app.config import Settings
 from app.providers import reference_voice_registry, registry
+from app.providers.elevenlabs_provider import V2_MODEL
 from app.storage import ambient_registry, files, series_registry
 
-from . import ambient, chunker, ffmpeg_stitch, podcast_music, qc, sleep_post, sleep_text, text_processor
+from . import ambient, chunker, f5_text, ffmpeg_stitch, podcast_music, qc, sleep_post, sleep_text, text_processor
+from . import emotion as emotion_mod
 from .errors import AmbientBedError, SeriesMusicError, VoiceAssignmentError
 from .models import (
     GeneratedFile,
@@ -56,7 +58,7 @@ def _wav_duration_ms(wav_path: Path) -> int:
 
 # Providers that clone from a reference clip — the only ones speaker-similarity QC
 # can score (it needs the reference timbre to compare against).
-_CLONE_PROVIDERS = {"f5", "cosyvoice"}
+_CLONE_PROVIDERS = {"f5"}
 
 # Cross-chunk continuity context: how many trailing/leading characters of an
 # adjacent chunk we hand the model as previous_text/next_text. ElevenLabs uses it
@@ -85,7 +87,6 @@ def _chunk_overrides(settings: Settings) -> dict[str, int]:
     return {
         "kokoro": settings.kokoro_chunk_chars,
         "f5": settings.f5_chunk_chars,
-        "cosyvoice": settings.cosyvoice_chunk_chars,
         "elevenlabs": settings.elevenlabs_chunk_chars,
     }
 
@@ -183,26 +184,60 @@ def _podcast_voice_settings(
     return vs or None
 
 
+_LEADING_TAG_RE = re.compile(r"^\s*\[([A-Za-z_]+)\]\s*")
+
+
+def _sleep_tone(text: str, settings: Settings) -> tuple[str | None, str]:
+    """Resolve ``(emotion, text)`` for a sleep segment.
+
+    A leading author tone tag that names a known emotion (``[calm] …``,
+    ``[warm] …``) becomes the segment's emotion and is *removed* from the text, so
+    both engines honor it through one canonical path: v3 performs the mapped inline
+    tag, v2 maps it to a warmer numeric profile (it can't perform tags). A leading
+    non-emotion cue (``[sighs] …``) is left inline for v3 to perform and no default
+    is imposed. Otherwise the configured ``sleep_default_tone`` is injected so even
+    untagged prose lands in a calm register.
+    """
+    match = _LEADING_TAG_RE.match(text)
+    if match:
+        label = match.group(1).lower()
+        if label in emotion_mod.EMOTIONS:
+            return label, text[match.end():]
+        return None, text  # an inline cue like [sighs] — leave it for the model
+    return (settings.sleep_default_tone or None), text
+
+
+def _supports_native_breaks(provider_name: str, model_id: str, settings: Settings) -> bool:
+    """True when ``[pause:N]`` should ride as a native ElevenLabs ``<break>`` tag.
+
+    Only ElevenLabs Multilingual v2 honours ``<break>``; v3 and the local engines
+    splice real silence instead. Gated by ``elevenlabs_v2_native_breaks``.
+    """
+    return (
+        provider_name == "elevenlabs"
+        and model_id == V2_MODEL
+        and settings.elevenlabs_v2_native_breaks
+    )
+
+
 def _sleep_voice_settings(
     provider, request: SleepStoryRequest, speed: float, settings: Settings,
-    *, prev_text: str = "", next_text: str = "",
+    *, prev_text: str = "", next_text: str = "", emotion: str | None = None,
 ) -> dict | None:
     """Sleep-story voice_settings, tailored to the provider's capabilities.
 
-    Instruct-capable models (``accepts_instruct``, i.e. CosyVoice3) get a
-    natural-language delivery directive — the calm/hypnotic pace rides this, not
-    a numeric rate, so it holds regardless of the cloned clip's energy. The
-    directive defaults to ``cosyvoice_sleep_instruct`` and is overridable per
-    story via ``style_prompt``. ElevenLabs (``has_native_speed``) gets a calm
-    content-type profile + native (per-chunk ramped) speed + optional model
-    override, plus cross-chunk continuity context and an optional ``seed``. Plain
-    local models (``consumes_local_speed``) get the slow ``speed`` as a rate
-    multiplier. Returns ``None`` when nothing applies.
+    ElevenLabs (``has_native_speed``) gets a calm content-type profile + native
+    (per-chunk ramped) speed + optional model override, plus cross-chunk
+    continuity context and an optional ``seed``. Plain local models
+    (``consumes_local_speed``) get the slow ``speed`` as a rate multiplier.
+    Returns ``None`` when nothing applies.
 
     ``speed`` is the effective per-chunk speed (already ramped by the caller).
     """
     if provider.has_native_speed:
         vs: dict = {"content_type": "sleep", "speed": speed}
+        if emotion:
+            vs["emotion"] = emotion
         if request.model_id:
             vs["model_id"] = request.model_id
         if getattr(provider, "accepts_continuity", False):
@@ -213,11 +248,12 @@ def _sleep_voice_settings(
             if request.seed is not None:
                 vs["seed"] = request.seed
         return vs
-    if provider.accepts_instruct:
-        instruct = request.style_prompt or settings.cosyvoice_sleep_instruct
-        return {"instruct": instruct} if instruct else None
     if provider.consumes_local_speed:
-        return {"speed": speed}
+        vs_local: dict = {"speed": speed}
+        if provider.name == "f5":
+            vs_local["nfe_step"] = settings.f5_sleep_nfe_step
+            vs_local["content_type"] = "sleep"
+        return vs_local
     return None
 
 
@@ -606,10 +642,13 @@ def _run_podcast(
                 continue
 
             provider = registry.get(op.provider)
+            synth_text = op.text
+            if op.provider == "f5":
+                synth_text = f5_text.normalize_for_f5(synth_text)
             vs = _podcast_voice_settings(provider, op, rng, settings, seed=request.seed)
             fmt = _segment_format_for(op.provider, settings, request_override=req_format)
             seg = provider.synthesize(
-                op.text, op.voice_id, output_format=fmt, voice_settings=vs
+                synth_text, op.voice_id, output_format=fmt, voice_settings=vs
             )
             chunk_path = work_dir / f"chunk_{chunk_counter:05d}.wav"
             ffmpeg_stitch.segment_to_wav_file(
@@ -659,8 +698,11 @@ def _run_podcast(
                 gap_counter += 1
 
             provider = registry.get(provider_name)
+            synth_text = chunk.text
+            if provider_name == "f5":
+                synth_text = f5_text.normalize_for_f5(synth_text)
             fmt = _segment_format_for(provider_name, settings, request_override=req_format)
-            seg = provider.synthesize(chunk.text, voice_id, output_format=fmt)
+            seg = provider.synthesize(synth_text, voice_id, output_format=fmt)
             chunk_path = work_dir / f"chunk_{i:05d}.wav"
             ffmpeg_stitch.segment_to_wav_file(
                 seg, chunk_path, sample_rate=rate, channels=1,
@@ -711,12 +753,14 @@ def _run_podcast(
 def _run_sleep(
     request: SleepStoryRequest, settings: Settings, report, job_id: str
 ) -> GenerateResult:
+    provider_name = request.provider
     base_speed = request.speed if request.speed is not None else settings.sleep_default_speed
+    if provider_name == "f5" and request.speed is None:
+        base_speed = settings.f5_sleep_speed
     base_pause_ms = (
         request.pause_ms if request.pause_ms is not None else settings.sleep_default_pause_ms
     )
     rate = settings.sleep_sample_rate
-    provider_name = request.provider
     overrides = _chunk_overrides(settings)
 
     provider = registry.get(provider_name)
@@ -735,6 +779,17 @@ def _run_sleep(
     # clipped, transactional tone (the provider's apply_text_normalization handles
     # the rest server-side).
     prose = sleep_text.spell_numbers(request.prose_text)
+    if provider_name == "kokoro":
+        prose = sleep_text.punctuation_to_pauses(
+            prose,
+            comma_ms=settings.kokoro_pause_comma_ms,
+            ellipsis_ms=settings.kokoro_pause_ellipsis_ms,
+            semicolon_ms=settings.kokoro_pause_semicolon_ms,
+            dash_ms=settings.kokoro_pause_dash_ms,
+            paragraph_ms=settings.kokoro_pause_paragraph_ms,
+        )
+    if provider_name == "f5":
+        prose = f5_text.normalize_for_f5(prose)
     plan = chunker.chunk_prose(prose, provider_name, overrides=overrides)
     total = len(plan)
 
@@ -742,43 +797,76 @@ def _run_sleep(
     work_dir = out_dir / "_chunks"
     work_dir.mkdir(parents=True, exist_ok=True)
 
+    # Engine resolution: only ElevenLabs v2 renders [pause:N] as a native <break>;
+    # every other engine splits the chunk here and splices real silence.
+    el_model = request.model_id or settings.elevenlabs_sleep_model
+    native_breaks = _supports_native_breaks(provider_name, el_model, settings)
+
     concat_paths: list[Path] = []
     narration_ms = 0
     gap_counter = 0
+    seg_counter = 0
+
+    def _splice_silence(duration_ms: int) -> None:
+        nonlocal narration_ms, gap_counter
+        if duration_ms <= 0:
+            return
+        gap_path = work_dir / f"pause_{gap_counter:05d}.wav"
+        ffmpeg_stitch.silence_wav(gap_path, duration_ms=duration_ms, sample_rate=rate)
+        concat_paths.append(gap_path)
+        narration_ms += duration_ms
+        gap_counter += 1
 
     for i, chunk in enumerate(plan):
         # Progressive ramp-down: per-chunk speed/pause ease toward sleep onset.
         speed, pause_ms = _sleep_ramp(
             request, base_speed, base_pause_ms, i, total, settings
         )
-        if i > 0 and pause_ms > 0:
-            gap_path = work_dir / f"pause_{gap_counter:05d}.wav"
-            ffmpeg_stitch.silence_wav(gap_path, duration_ms=pause_ms, sample_rate=rate)
-            concat_paths.append(gap_path)
-            narration_ms += pause_ms
-            gap_counter += 1
+        if i > 0:
+            _splice_silence(pause_ms)  # inter-sentence pause between chunks
 
         prev_text = _continuity_text(plan[i - 1].text, tail=True) if i > 0 else ""
         next_text = (
             _continuity_text(plan[i + 1].text, tail=False) if i < total - 1 else ""
         )
-        voice_settings = _sleep_voice_settings(
-            provider, request, speed, settings,
-            prev_text=prev_text, next_text=next_text,
-        )
-        seg = provider.synthesize(
-            chunk.text,
-            request.voice_id,
-            output_format=_segment_format_for(provider_name, settings),
-            voice_settings=voice_settings,
-        )
-        chunk_path = work_dir / f"chunk_{i:05d}.wav"
-        ffmpeg_stitch.segment_to_wav_file(
-            seg, chunk_path, sample_rate=rate, channels=1,
-            edge_fade_ms=settings.chunk_edge_fade_ms,
-        )
-        concat_paths.append(chunk_path)
-        narration_ms += len(seg)
+
+        # Author-placed [pause:N] breaths. v2 keeps the marker inline (translated to
+        # a native <break> by the provider); other engines split into sub-segments
+        # separated by spliced silence so the breath is honored everywhere.
+        if native_breaks:
+            pieces = [(chunk.text, 0)]
+        else:
+            pieces = sleep_text.split_pauses(
+                chunk.text, max_ms=settings.sleep_pause_marker_max_ms
+            )
+
+        for j, (piece_text, pause_after_ms) in enumerate(pieces):
+            tone, piece_text = _sleep_tone(piece_text, settings)
+            if provider_name == "f5":
+                piece_text = f5_text.normalize_for_f5(piece_text)
+            if piece_text.strip():
+                voice_settings = _sleep_voice_settings(
+                    provider, request, speed, settings,
+                    prev_text=prev_text if j == 0 else "",
+                    next_text=next_text if j == len(pieces) - 1 else "",
+                    emotion=tone,
+                )
+                seg = provider.synthesize(
+                    piece_text,
+                    request.voice_id,
+                    output_format=_segment_format_for(provider_name, settings),
+                    voice_settings=voice_settings,
+                )
+                chunk_path = work_dir / f"chunk_{seg_counter:05d}.wav"
+                ffmpeg_stitch.segment_to_wav_file(
+                    seg, chunk_path, sample_rate=rate, channels=1,
+                    edge_fade_ms=settings.chunk_edge_fade_ms,
+                )
+                concat_paths.append(chunk_path)
+                narration_ms += len(seg)
+                seg_counter += 1
+            _splice_silence(pause_after_ms)  # the author's deliberate breath
+
         report(step=f"Synthesizing {i + 1}/{total}", chunks_done=i + 1, chunks_total=total)
 
     report(step="Stitching", chunks_done=total, chunks_total=total)
@@ -800,6 +888,14 @@ def _run_sleep(
             bed_gain_db=settings.ambient_bed_gain_db,
             fade_s=settings.sleep_fade_out_s,
             sample_rate=rate,
+            lowpass_hz=settings.ambient_bed_lowpass_hz,
+            highpass_hz=settings.ambient_bed_highpass_hz,
+            loop_crossfade_s=settings.ambient_loop_crossfade_s,
+            duck=settings.ambient_duck,
+            duck_ratio=settings.ambient_duck_ratio,
+            duck_threshold_db=settings.ambient_duck_threshold_db,
+            duck_release_ms=settings.ambient_duck_release_ms,
+            bed_target_lufs=settings.ambient_bed_target_lufs,
         )
     else:
         final_wav = processed

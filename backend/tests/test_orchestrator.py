@@ -220,38 +220,6 @@ def test_sleep_run_injects_speed_for_local_providers(settings, clean_registry):
 
 
 @needs_ffmpeg
-def test_sleep_run_injects_instruct_for_cosyvoice(settings, clean_registry):
-    cosy = FakeProvider(name="cosyvoice", accepts_instruct=True)
-    registry.register(cosy)
-    req = SleepStoryRequest(
-        prose_text="The night was calm. Sleep came softly.",
-        provider="cosyvoice",
-        voice_id="david",
-    )
-    orchestrator.run(req, settings, job_id="jobcosy")
-    assert cosy.synth_calls
-    # The configured sleep directive is injected (delivery, not numeric speed).
-    for c in cosy.synth_calls:
-        assert c["voice_settings"]["instruct"] == settings.cosyvoice_sleep_instruct
-
-
-@needs_ffmpeg
-def test_sleep_run_style_prompt_overrides_instruct(settings, clean_registry):
-    cosy = FakeProvider(name="cosyvoice", accepts_instruct=True)
-    registry.register(cosy)
-    req = SleepStoryRequest(
-        prose_text="A quiet story.",
-        provider="cosyvoice",
-        voice_id="david",
-        style_prompt="Whisper very slowly.",
-    )
-    orchestrator.run(req, settings, job_id="jobcosy2")
-    assert cosy.synth_calls
-    for c in cosy.synth_calls:
-        assert c["voice_settings"] == {"instruct": "Whisper very slowly."}
-
-
-@needs_ffmpeg
 def test_sleep_run_builds_calm_settings_for_elevenlabs(settings, clean_registry):
     el = FakeProvider(name="elevenlabs", has_native_speed=True)
     registry.register(el)
@@ -270,7 +238,67 @@ def test_sleep_run_builds_calm_settings_for_elevenlabs(settings, clean_registry)
             "content_type": "sleep",
             "speed": 0.85,
             "model_id": "eleven_v3",
+            # Untagged prose gets the default calm tone injected (v3 -> [calm]).
+            "emotion": "soothing",
         }
+
+
+@needs_ffmpeg
+def test_sleep_v3_splices_pause_marker_into_silence(settings, clean_registry):
+    el = FakeProvider(name="elevenlabs", has_native_speed=True)
+    registry.register(el)
+    req = SleepStoryRequest(
+        prose_text="The lake is still. [pause:1000] Sleep now.",
+        provider="elevenlabs",
+        voice_id="rachel",
+        model_id="eleven_v3",
+        ramp=False,
+    )
+    orchestrator.run(req, settings, job_id="jobv3pause")
+    texts = [c["text"] for c in el.synth_calls]
+    # v3 has no native break: the marker is split out (never sent to the model) and
+    # the breath becomes real silence between two synthesized segments.
+    assert all("pause" not in t for t in texts)
+    assert any("The lake is still." in t for t in texts)
+    assert any("Sleep now." in t for t in texts)
+
+
+@needs_ffmpeg
+def test_sleep_leading_tone_tag_becomes_emotion_and_is_stripped(settings, clean_registry):
+    el = FakeProvider(name="elevenlabs", has_native_speed=True)
+    registry.register(el)
+    req = SleepStoryRequest(
+        prose_text="[warm] The fire has already been lit.",
+        provider="elevenlabs",
+        voice_id="rachel",
+        model_id="eleven_multilingual_v2",
+        ramp=False,
+    )
+    orchestrator.run(req, settings, job_id="jobtone")
+    assert len(el.synth_calls) == 1
+    call = el.synth_calls[0]
+    # The author's [warm] drives the emotion (v2 maps it to a warmer profile) and is
+    # removed from the text so it's never spoken or double-tagged.
+    assert call["voice_settings"]["emotion"] == "warm"
+    assert call["text"] == "The fire has already been lit."
+
+
+@needs_ffmpeg
+def test_sleep_v2_keeps_pause_marker_for_native_break(settings, clean_registry):
+    el = FakeProvider(name="elevenlabs", has_native_speed=True)
+    registry.register(el)
+    req = SleepStoryRequest(
+        prose_text="The lake is still. [pause:1000] Sleep now.",
+        provider="elevenlabs",
+        voice_id="rachel",
+        model_id="eleven_multilingual_v2",
+        ramp=False,
+    )
+    orchestrator.run(req, settings, job_id="jobv2pause")
+    # v2 renders the breath natively: the orchestrator leaves the marker inline in a
+    # single synth call (the provider translates it to a <break>).
+    assert len(el.synth_calls) == 1
+    assert "[pause:1000]" in el.synth_calls[0]["text"]
 
 
 @needs_ffmpeg
@@ -380,3 +408,87 @@ def test_sleep_numbers_are_spelled_before_synthesis(settings, fake):
     orchestrator.run(req, settings, job_id="jobnum")
     assert any("three" in c["text"] for c in fake.synth_calls)
     assert all("3" not in c["text"] for c in fake.synth_calls)
+
+
+# ── F5 text normalization + sleep settings ─────────────────────────────────────
+
+
+@needs_ffmpeg
+def test_sleep_f5_text_normalized(clean_registry, tmp_path):
+    """F5 sleep stories should have text normalized (colons->commas, etc.)."""
+    from app.core.orchestrator import run
+    from app.core.models import SleepStoryRequest
+    from app.config import Settings
+    from tests.conftest import FakeProvider
+
+    fake = FakeProvider(name="f5", consumes_local_speed=True)
+    clean_registry.register(fake)
+
+    settings = Settings(output_dir=str(tmp_path / "out"))
+    request = SleepStoryRequest(
+        prose_text="Rest now: find well-being... BREATHE deeply.",
+        voice_id="f5-v1",
+        provider="f5",
+    )
+    run(request, settings, job_id="test-f5-norm")
+
+    # Check that the text passed to synthesize was normalized
+    texts = [c["text"] for c in fake.synth_calls]
+    combined = " ".join(texts)
+    assert ":" not in combined  # colons removed
+    assert "..." not in combined  # ellipses removed
+    assert "BREATHE" not in combined  # ALL_CAPS lowered
+
+
+@needs_ffmpeg
+def test_sleep_f5_voice_settings_has_nfe_and_content_type(clean_registry, tmp_path):
+    """F5 sleep stories should pass nfe_step and content_type in voice_settings."""
+    from app.core.orchestrator import run
+    from app.core.models import SleepStoryRequest
+    from app.config import Settings
+    from tests.conftest import FakeProvider
+
+    fake = FakeProvider(name="f5", consumes_local_speed=True)
+    clean_registry.register(fake)
+
+    settings = Settings(
+        output_dir=str(tmp_path / "out"),
+        f5_sleep_nfe_step=32,
+    )
+    request = SleepStoryRequest(
+        prose_text="The night is calm.",
+        voice_id="f5-v1",
+        provider="f5",
+    )
+    run(request, settings, job_id="test-f5-vs")
+
+    vs = fake.synth_calls[0]["voice_settings"]
+    assert vs["nfe_step"] == 32
+    assert vs["content_type"] == "sleep"
+
+
+@needs_ffmpeg
+def test_sleep_f5_uses_sleep_speed(clean_registry, tmp_path):
+    """F5 sleep should use f5_sleep_speed as the base, not sleep_default_speed."""
+    from app.core.orchestrator import run
+    from app.core.models import SleepStoryRequest
+    from app.config import Settings
+    from tests.conftest import FakeProvider
+
+    fake = FakeProvider(name="f5", consumes_local_speed=True)
+    clean_registry.register(fake)
+
+    settings = Settings(
+        output_dir=str(tmp_path / "out"),
+        f5_sleep_speed=0.88,
+        sleep_default_speed=0.78,  # this should NOT be used for F5
+    )
+    request = SleepStoryRequest(
+        prose_text="The night is calm and still.",
+        voice_id="f5-v1",
+        provider="f5",
+    )
+    run(request, settings, job_id="test-f5-speed")
+
+    vs = fake.synth_calls[0]["voice_settings"]
+    assert vs["speed"] == pytest.approx(0.88, abs=0.05)
