@@ -43,17 +43,10 @@ class ScriptTurn(BaseModel):
 
 
 class SpeakerVoice(BaseModel):
-    """The provider + voice assigned to one speaker label.
+    """The provider + voice assigned to one speaker label."""
 
-    ``model_id`` is an optional, provider-specific model override (used by
-    ElevenLabs to pick ``eleven_multilingual_v2`` vs ``eleven_v3``). Other
-    providers ignore it; when unset the provider falls back to its configured
-    per-content-type default.
-    """
-
-    provider: str = "elevenlabs"
+    provider: str = "kokoro"
     voice_id: str
-    model_id: str | None = None
 
 
 class GenerateRequest(BaseModel):
@@ -84,9 +77,6 @@ class PodcastRequest(BaseModel):
     # speed jitter, and inline tone/pause tags. On by default; set False for the
     # legacy flat render (one block per turn, fixed gaps, no emotion).
     pacing: bool = True
-    # Optional deterministic seed forwarded to ElevenLabs so a re-render matches
-    # the previous cadence/emotion trajectory. None lets the model sample freely.
-    seed: int | None = None
     # Series slug for branded intro/outro with music. None = no branding.
     series: str | None = None
 
@@ -104,7 +94,6 @@ class SleepStoryRequest(BaseModel):
     prose_text: str
     provider: str = "kokoro"
     voice_id: str
-    model_id: str | None = None  # ElevenLabs model override (v2/v3); else ignored
     speed: float | None = None  # overrides Settings.sleep_default_speed
     pause_ms: int | None = None  # inter-sentence silence; overrides default
     ambient_bed: str | None = None  # slug from /api/ambient (optional)
@@ -113,9 +102,6 @@ class SleepStoryRequest(BaseModel):
     # single fixed speed/pause for the whole narration.
     ramp: bool = True
     style_prompt: str | None = None
-    # Optional deterministic seed forwarded to ElevenLabs for reproducible
-    # re-renders. None lets the model sample freely.
-    seed: int | None = None
 
 
 JobRequest = Annotated[

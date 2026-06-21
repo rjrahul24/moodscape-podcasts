@@ -1,51 +1,12 @@
-from io import BytesIO
-
 import numpy as np
 import pytest
 from pydub import AudioSegment
 
 from app.core.stitcher import (
-    audio_container,
-    bytes_to_segment,
     export_master,
     numpy_to_segment,
     stitch,
 )
-
-
-def _encode(segment: AudioSegment, fmt: str) -> bytes:
-    buffer = BytesIO()
-    segment.export(buffer, format=fmt)
-    return buffer.getvalue()
-
-
-def test_audio_container_mapping():
-    assert audio_container("mp3_44100_128") == "mp3"
-    assert audio_container("wav_44100") == "wav"
-    assert audio_container("opus_48000_128") == "ogg"
-
-
-def test_audio_container_maps_raw_pcm():
-    assert audio_container("pcm_44100") == "raw_pcm"
-    assert audio_container("pcm_24000") == "raw_pcm"
-
-
-def test_bytes_to_segment_roundtrip_pcm():
-    sr = 44100
-    duration_s = 0.5
-    n_samples = int(sr * duration_s)
-    samples = np.zeros(n_samples, dtype="<i2")
-    seg = bytes_to_segment(samples.tobytes(), f"pcm_{sr}")
-    assert seg.frame_rate == sr
-    assert seg.channels == 1
-    assert seg.sample_width == 2
-    assert abs(len(seg) - 500) < 20
-
-
-def test_bytes_to_segment_roundtrip_wav():
-    original = AudioSegment.silent(duration=500)
-    decoded = bytes_to_segment(_encode(original, "wav"), "wav_44100")
-    assert abs(len(decoded) - 500) < 50
 
 
 def test_numpy_to_segment_roundtrip_24k():

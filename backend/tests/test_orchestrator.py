@@ -99,12 +99,10 @@ def test_podcast_pacing_is_deterministic(settings, clean_registry):
 
 
 @needs_ffmpeg
-def test_breath_tag_routes_by_provider_capability(settings, clean_registry):
-    """A non-inline provider turns [deep_breath] into a silence; an inline-SFX
-    provider keeps it in the synthesized text."""
+def test_breath_tag_becomes_pause_for_local_providers(settings, clean_registry):
+    """Local providers turn [deep_breath] into a silence; the tag is never spoken."""
     script = "[Speaker 1]: Settle in. [deep_breath] And rest."
 
-    # Default (no inline SFX): tag becomes a pause, never spoken.
     plain = FakeProvider(name="kokoro", consumes_local_speed=True)
     registry.register(plain)
     orchestrator.run(
@@ -116,20 +114,6 @@ def test_breath_tag_routes_by_provider_capability(settings, clean_registry):
         job_id="jobsfx1",
     )
     assert all("[deep_breath]" not in c["text"] for c in plain.synth_calls)
-
-    # Inline-SFX provider: the tag stays in the text for the model to perform.
-    registry.clear()
-    performer = FakeProvider(name="perf", accepts_inline_sfx=True)
-    registry.register(performer)
-    orchestrator.run(
-        PodcastRequest(
-            script_text=script,
-            speakers={"Speaker 1": {"provider": "perf", "voice_id": "a"}},
-        ),
-        settings,
-        job_id="jobsfx2",
-    )
-    assert any("[deep_breath]" in c["text"] for c in performer.synth_calls)
 
 
 @needs_ffmpeg
@@ -216,67 +200,44 @@ def test_sleep_run_injects_speed_for_local_providers(settings, clean_registry):
     )
     orchestrator.run(req, settings, job_id="jobk")
     assert local.synth_calls
-    assert all(c["voice_settings"] == {"speed": 0.8} for c in local.synth_calls)
-
-
-@needs_ffmpeg
-def test_sleep_run_builds_calm_settings_for_elevenlabs(settings, clean_registry):
-    el = FakeProvider(name="elevenlabs", has_native_speed=True)
-    registry.register(el)
-    req = SleepStoryRequest(
-        prose_text="The night was calm. Sleep came softly.",
-        provider="elevenlabs",
-        voice_id="rachel",
-        model_id="eleven_v3",
-        speed=0.85,
-        pause_ms=100,
+    assert all(
+        c["voice_settings"]["speed"] == 0.8
+        for c in local.synth_calls
     )
-    orchestrator.run(req, settings, job_id="jobels")
-    assert el.synth_calls
-    for c in el.synth_calls:
-        assert c["voice_settings"] == {
-            "content_type": "sleep",
-            "speed": 0.85,
-            "model_id": "eleven_v3",
-            # Untagged prose gets the default calm tone injected (v3 -> [calm]).
-            "emotion": "soothing",
-        }
 
 
 @needs_ffmpeg
-def test_sleep_v3_splices_pause_marker_into_silence(settings, clean_registry):
-    el = FakeProvider(name="elevenlabs", has_native_speed=True)
-    registry.register(el)
+def test_sleep_splices_pause_marker_into_silence(settings, clean_registry):
+    local = FakeProvider(name="kokoro", consumes_local_speed=True)
+    registry.register(local)
     req = SleepStoryRequest(
         prose_text="The lake is still. [pause:1000] Sleep now.",
-        provider="elevenlabs",
-        voice_id="rachel",
-        model_id="eleven_v3",
+        provider="kokoro",
+        voice_id="af_heart",
         ramp=False,
     )
-    orchestrator.run(req, settings, job_id="jobv3pause")
-    texts = [c["text"] for c in el.synth_calls]
-    # v3 has no native break: the marker is split out (never sent to the model) and
-    # the breath becomes real silence between two synthesized segments.
+    orchestrator.run(req, settings, job_id="jobpause")
+    texts = [c["text"] for c in local.synth_calls]
+    # The marker is split out (never sent to the model) and the breath becomes
+    # real silence between two synthesized segments.
     assert all("pause" not in t for t in texts)
     assert any("The lake is still." in t for t in texts)
     assert any("Sleep now." in t for t in texts)
 
 
 @needs_ffmpeg
-def test_sleep_v3_splices_bare_pause_into_silence(settings, clean_registry):
-    """A bare [pause] (no duration) should also splice silence for v3."""
-    el = FakeProvider(name="elevenlabs", has_native_speed=True)
-    registry.register(el)
+def test_sleep_splices_bare_pause_into_silence(settings, clean_registry):
+    """A bare [pause] (no duration) should also splice silence."""
+    local = FakeProvider(name="kokoro", consumes_local_speed=True)
+    registry.register(local)
     req = SleepStoryRequest(
         prose_text="The lake is still. [pause] Sleep now.",
-        provider="elevenlabs",
-        voice_id="rachel",
-        model_id="eleven_v3",
+        provider="kokoro",
+        voice_id="af_heart",
         ramp=False,
     )
-    orchestrator.run(req, settings, job_id="jobv3bare")
-    texts = [c["text"] for c in el.synth_calls]
+    orchestrator.run(req, settings, job_id="jobbare")
+    texts = [c["text"] for c in local.synth_calls]
     assert all("pause" not in t.lower() for t in texts)
     assert any("The lake is still." in t for t in texts)
     assert any("Sleep now." in t for t in texts)
@@ -284,59 +245,20 @@ def test_sleep_v3_splices_bare_pause_into_silence(settings, clean_registry):
 
 @needs_ffmpeg
 def test_sleep_leading_tone_tag_becomes_emotion_and_is_stripped(settings, clean_registry):
-    el = FakeProvider(name="elevenlabs", has_native_speed=True)
-    registry.register(el)
+    local = FakeProvider(name="kokoro", consumes_local_speed=True)
+    registry.register(local)
     req = SleepStoryRequest(
         prose_text="[warm] The fire has already been lit.",
-        provider="elevenlabs",
-        voice_id="rachel",
-        model_id="eleven_multilingual_v2",
+        provider="kokoro",
+        voice_id="af_heart",
         ramp=False,
     )
     orchestrator.run(req, settings, job_id="jobtone")
-    assert len(el.synth_calls) == 1
-    call = el.synth_calls[0]
-    # The author's [warm] drives the emotion (v2 maps it to a warmer profile) and is
-    # removed from the text so it's never spoken or double-tagged.
+    assert len(local.synth_calls) == 1
+    call = local.synth_calls[0]
+    # The author's [warm] drives the emotion and is removed from the text.
     assert call["voice_settings"]["emotion"] == "warm"
     assert call["text"] == "The fire has already been lit."
-
-
-@needs_ffmpeg
-def test_sleep_v2_keeps_pause_marker_for_native_break(settings, clean_registry):
-    el = FakeProvider(name="elevenlabs", has_native_speed=True)
-    registry.register(el)
-    req = SleepStoryRequest(
-        prose_text="The lake is still. [pause:1000] Sleep now.",
-        provider="elevenlabs",
-        voice_id="rachel",
-        model_id="eleven_multilingual_v2",
-        ramp=False,
-    )
-    orchestrator.run(req, settings, job_id="jobv2pause")
-    # v2 renders the breath natively: the orchestrator leaves the marker inline in a
-    # single synth call (the provider translates it to a <break>).
-    assert len(el.synth_calls) == 1
-    assert "[pause:1000]" in el.synth_calls[0]["text"]
-
-
-@needs_ffmpeg
-def test_podcast_passes_content_type_and_model_to_elevenlabs(settings, clean_registry):
-    el = FakeProvider(name="elevenlabs", has_native_speed=True)
-    registry.register(el)
-    req = PodcastRequest(
-        script_text="[Speaker 1]: [calm] Welcome in. Settle for a moment.",
-        speakers={"Speaker 1": {"provider": "elevenlabs", "voice_id": "rachel", "model_id": "eleven_v3"}},
-    )
-    orchestrator.run(req, settings, job_id="jobelp")
-    assert el.synth_calls
-    for c in el.synth_calls:
-        vs = c["voice_settings"]
-        assert vs["content_type"] == "podcast"
-        assert vs["model_id"] == "eleven_v3"
-        assert vs["emotion"] == "calm"
-        assert vs["speed"] == 1.0  # fixed base speed for cloud providers (no jitter)
-        assert "[calm]" not in c["text"]  # tag stripped by the planner
 
 
 @needs_ffmpeg
@@ -385,53 +307,12 @@ def test_sleep_unknown_ambient_bed_raises(settings, fake):
         orchestrator.run(req, settings, job_id="x")
 
 
-# ── continuity + sleep ramp-down ────────────────────────────────────────────────
-
-
-@needs_ffmpeg
-def test_continuity_injected_for_capable_provider(settings, clean_registry):
-    """A continuity-capable provider receives prev/next context across chunks."""
-    el = FakeProvider(name="elevenlabs", has_native_speed=True, accepts_continuity=True)
-    registry.register(el)
-    req = PodcastRequest(
-        script_text="[Speaker 1]: One. Two. Three.",
-        speakers={"Speaker 1": {"provider": "elevenlabs", "voice_id": "rachel"}},
-        seed=7,
-    )
-    orchestrator.run(req, settings, job_id="jobcont")
-    calls = el.synth_calls
-    assert len(calls) == 3
-    # First has no previous context but looks ahead; middle has both; last only back.
-    assert "previous_text" not in calls[0]["voice_settings"]
-    assert calls[0]["voice_settings"]["next_text"]
-    assert calls[1]["voice_settings"]["previous_text"]
-    assert calls[1]["voice_settings"]["next_text"]
-    assert calls[2]["voice_settings"]["previous_text"]
-    assert "next_text" not in calls[2]["voice_settings"]
-    # The seed rides along for capable providers.
-    assert all(c["voice_settings"]["seed"] == 7 for c in calls)
-
-
-@needs_ffmpeg
-def test_continuity_skipped_without_capability(settings, clean_registry):
-    """has_native_speed alone (no accepts_continuity) gets no prev/next/seed."""
-    el = FakeProvider(name="elevenlabs", has_native_speed=True)
-    registry.register(el)
-    req = PodcastRequest(
-        script_text="[Speaker 1]: One. Two. Three.",
-        speakers={"Speaker 1": {"provider": "elevenlabs", "voice_id": "rachel"}},
-        seed=7,
-    )
-    orchestrator.run(req, settings, job_id="jobnocont")
-    for c in el.synth_calls:
-        assert "previous_text" not in c["voice_settings"]
-        assert "next_text" not in c["voice_settings"]
-        assert "seed" not in c["voice_settings"]
+# ── sleep ramp-down ──────────────────────────────────────────────────────────
 
 
 def test_sleep_ramp_decelerates_and_lengthens_pauses(settings):
     """With ramp on, per-chunk speed eases down and pauses grow, monotonically."""
-    req = SleepStoryRequest(prose_text="x", provider="elevenlabs", voice_id="v", ramp=True)
+    req = SleepStoryRequest(prose_text="x", provider="kokoro", voice_id="v", ramp=True)
     total = 5
     results = [
         orchestrator._sleep_ramp(req, 0.90, 800, i, total, settings)
@@ -446,7 +327,7 @@ def test_sleep_ramp_decelerates_and_lengthens_pauses(settings):
 
 
 def test_sleep_ramp_off_holds_fixed_values(settings):
-    req = SleepStoryRequest(prose_text="x", provider="elevenlabs", voice_id="v", ramp=False)
+    req = SleepStoryRequest(prose_text="x", provider="kokoro", voice_id="v", ramp=False)
     for i in range(4):
         assert orchestrator._sleep_ramp(req, 0.85, 900, i, 4, settings) == (0.85, 900)
 
@@ -465,38 +346,10 @@ def test_sleep_numbers_are_spelled_before_synthesis(settings, fake):
 
 
 @needs_ffmpeg
-def test_sleep_ellipsis_injected_for_elevenlabs_when_enabled(tmp_path, clean_registry):
-    el = FakeProvider(name="elevenlabs", has_native_speed=True)
-    clean_registry.register(el)
-    settings = Settings(
-        output_dir=str(tmp_path), also_export_wav=False,
-        sleep_sentence_ellipsis=True,
-    )
-    req = SleepStoryRequest(
-        prose_text="The night was calm. Sleep came softly.",
-        provider="elevenlabs", voice_id="rachel", model_id="eleven_v3", pause_ms=0,
-    )
-    orchestrator.run(req, settings, job_id="jobell")
-    assert any("…" in c["text"] for c in el.synth_calls)
-
-
-@needs_ffmpeg
-def test_sleep_ellipsis_off_by_default(settings, clean_registry):
-    el = FakeProvider(name="elevenlabs", has_native_speed=True)
-    clean_registry.register(el)
-    req = SleepStoryRequest(
-        prose_text="The night was calm. Sleep came softly.",
-        provider="elevenlabs", voice_id="rachel", model_id="eleven_v3", pause_ms=0,
-    )
-    orchestrator.run(req, settings, job_id="jobnoell")
-    assert all("…" not in c["text"] for c in el.synth_calls)
-
-
-@needs_ffmpeg
 def test_sleep_per_chunk_normalization_runs_for_long_chunks(tmp_path, clean_registry, monkeypatch):
     # Chunk longer than the guard so normalization fires; spy on the helper.
-    el = FakeProvider(name="elevenlabs", duration_ms=500, has_native_speed=True)
-    clean_registry.register(el)
+    local = FakeProvider(name="kokoro", duration_ms=500, consumes_local_speed=True)
+    clean_registry.register(local)
     calls: list[tuple] = []
     real = orchestrator.ffmpeg_stitch.normalize_loudness
 
@@ -507,8 +360,8 @@ def test_sleep_per_chunk_normalization_runs_for_long_chunks(tmp_path, clean_regi
     monkeypatch.setattr(orchestrator.ffmpeg_stitch, "normalize_loudness", spy)
     settings = Settings(output_dir=str(tmp_path), also_export_wav=False)
     req = SleepStoryRequest(
-        prose_text="The lake is still.", provider="elevenlabs",
-        voice_id="rachel", model_id="eleven_v3", pause_ms=0,
+        prose_text="The lake is still.", provider="kokoro",
+        voice_id="af_heart", pause_ms=0,
     )
     orchestrator.run(req, settings, job_id="jobnorm")
     assert calls, "normalize_loudness should run for >=400ms chunks"
@@ -517,8 +370,8 @@ def test_sleep_per_chunk_normalization_runs_for_long_chunks(tmp_path, clean_regi
 
 @needs_ffmpeg
 def test_sleep_per_chunk_normalization_skips_short_chunks(tmp_path, clean_registry, monkeypatch):
-    el = FakeProvider(name="elevenlabs", duration_ms=200, has_native_speed=True)
-    clean_registry.register(el)
+    local = FakeProvider(name="kokoro", duration_ms=200, consumes_local_speed=True)
+    clean_registry.register(local)
     calls: list = []
     monkeypatch.setattr(
         orchestrator.ffmpeg_stitch, "normalize_loudness",
@@ -526,8 +379,8 @@ def test_sleep_per_chunk_normalization_skips_short_chunks(tmp_path, clean_regist
     )
     settings = Settings(output_dir=str(tmp_path), also_export_wav=False)
     req = SleepStoryRequest(
-        prose_text="The lake is still.", provider="elevenlabs",
-        voice_id="rachel", model_id="eleven_v3", pause_ms=0,
+        prose_text="The lake is still.", provider="kokoro",
+        voice_id="af_heart", pause_ms=0,
     )
     orchestrator.run(req, settings, job_id="jobshort")
     assert not calls, "chunks under the min-ms guard must skip normalization"

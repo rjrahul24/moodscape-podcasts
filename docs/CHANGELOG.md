@@ -3,6 +3,30 @@
 Append-only log of notable changes and the decisions behind them. Newest first.
 Every change should add an entry (see `CLAUDE.md` → Documentation discipline).
 
+## 2026-06-21 — Remove ElevenLabs, go fully open-source
+
+- **Removed** the entire ElevenLabs cloud provider integration: provider code,
+  tests, API key config, voice catalog filtering, model selection UI (v2/v3),
+  continuity context, native break tags, `seed` and `model_id` fields,
+  `bytes_to_segment`/`audio_container` stitcher functions, and all
+  ElevenLabs-specific environment variables.
+- **Removed** capability flags from the provider base class that existed only for
+  ElevenLabs: `has_native_speed`, `accepts_inline_sfx`, `accepts_continuity`.
+  Kept `consumes_local_speed` (used by Kokoro and F5).
+- **Simplified** the orchestrator: removed cross-chunk continuity, native break
+  logic, cloud-provider voice_settings branches, and ElevenLabs sleep ellipsis
+  injection. Sleep stories now always splice silence for `[pause:N]` markers.
+- **Changed** default provider from `"elevenlabs"` to `"kokoro"` throughout
+  backend models, config, and frontend.
+- **Removed** `ELEVENLABS_MODELS` constant and model dropdown from the frontend.
+- **Why:** The project is refocusing exclusively on open-source local models
+  (Kokoro for built-in voices, F5 for voice cloning). Removing the cloud
+  provider simplifies the codebase significantly (~800 lines deleted) and
+  eliminates external API dependencies. All 178 backend tests pass; frontend
+  builds cleanly.
+
+---
+
 ## 2026-06-21 — M4A default export
 
 - **Changed** default output from WAV + MP3 to M4A + WAV.

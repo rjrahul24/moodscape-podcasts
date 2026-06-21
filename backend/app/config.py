@@ -26,7 +26,7 @@ class VoiceCatalogEntry(BaseModel):
 
     id: str
     label: str | None = None
-    provider: str = "elevenlabs"
+    provider: str = "kokoro"
 
 
 class Settings(BaseSettings):
@@ -36,50 +36,8 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # ElevenLabs. ``elevenlabs_model_id`` is the global fallback; the per-content
-    # defaults below are used when a request doesn't pin a model. The UI can
-    # override per speaker / per sleep story (v2 vs v3). v3 is the default — it
-    # performs inline audio tags ([warmly], [exhales softly], …) for expressive
-    # podcasts and calm sleep narration; v2 remains selectable as a stable
-    # fallback. v3 caps requests at 5k chars (under elevenlabs_chunk_chars, fine).
-    elevenlabs_api_key: str | None = None
-    elevenlabs_base_url: str = "https://api.elevenlabs.io"
-    elevenlabs_model_id: str = "eleven_multilingual_v2"
-    elevenlabs_podcast_model: str = "eleven_v3"
-    elevenlabs_sleep_model: str = "eleven_v3"
-    # Pull the voice "closer" (intimate proximity) — research sweet spot for both
-    # expressive dialogue and bedtime narration. Sent on every EL request.
-    elevenlabs_use_speaker_boost: bool = True
-    # Server-side text normalization ("auto"|"on"|"off"): spells numbers/symbols
-    # so the model never reads digits in a clipped, transactional tone.
-    elevenlabs_text_normalization: str = "auto"
-    # v3 sleep stability (discrete: 0.0 Creative / 0.5 Natural / 1.0 Robust).
-    # Natural (0.5) keeps the inline calming tags ([calm], [warmly]) *responsive*
-    # while staying steady — Robust (1.0) is more consistent but largely ignores
-    # the tags, defeating the reason to run v3 for an expressive-but-calm read.
-    elevenlabs_sleep_v3_stability: float = 0.5
-    # Optional v3 sleep pacing tag, *reasserted on every chunk*. v3 tends to drift
-    # from a calm bedtime register toward an "audiobook narrator" read over a long
-    # story; prepending a pacing tag (e.g. "[slowly]") to each chunk holds the slow
-    # register to the end. Empty string = disabled (today's behaviour); applies
-    # only to sleep + v3, landing after the emotion tag (e.g. "[calm][slowly] …").
-    elevenlabs_sleep_v3_pacing_tag: str = ""
-    # On v2, translate author-placed [pause:N] markers into native <break time>
-    # tags so ElevenLabs renders the breath with model-aware prosody (smoother
-    # than a spliced silence). v3 has no break tags, so it always splices.
-    elevenlabs_v2_native_breaks: bool = True
-    # Per-provider intermediate format. Chunks are decoded then re-encoded for the
-    # final master, so a higher-quality intermediate reduces loss *before*
-    # mastering. ElevenLabs gates formats by plan tier:
-    #   • mp3_44100_192 — Creator tier and up; the default (best non-PCM option).
-    #   • pcm_44100      — lossless, but **Pro tier and up only** (the API rejects
-    #                      it on lower tiers). On Pro, set this for a truly lossless
-    #                      intermediate (matches sleep_sample_rate, no resample);
-    #                      bytes_to_segment already decodes raw pcm_*.
-    elevenlabs_segment_format: str = "mp3_44100_192"
-
     # Providers
-    default_provider: str = "elevenlabs"
+    default_provider: str = "kokoro"
 
     # Audio
     segment_output_format: str = "mp3_44100_128"
@@ -98,7 +56,7 @@ class Settings(BaseSettings):
     podcast_intra_sentence_gap_ms_max: int = 220
     podcast_turn_gap_jitter: float = 0.4  # ±fraction applied to inter_turn_gap_ms
     # All segments are normalized to this rate before stitching, so providers
-    # with different native rates (ElevenLabs 44.1kHz, local models 24kHz) mix.
+    # with different native rates (Kokoro/F5 at 24kHz) mix cleanly.
     target_sample_rate: int = 44100
     # Short equal-power fade applied to each chunk WAV's edges before the concat
     # demuxer joins them — removes zero-crossing click artifacts at boundaries
@@ -153,38 +111,29 @@ class Settings(BaseSettings):
     # F5 stays within ~30s/pass. See core/chunker.py for the char-vs-token note.
     kokoro_chunk_chars: int = 400
     f5_chunk_chars: int = 250  # ~18s/pass: well under F5's ~30s garble edge
-    elevenlabs_chunk_chars: int = 1000
 
     # Sleep stories (single-speaker, calming treatment — NOT applied to podcasts).
-    # Base pace sits low (ElevenLabs honours 0.7–1.2; 0.7 is the slowest). Sleep
-    # wants an unhurried read, so the default leans toward that floor and the
-    # ramp eases it further. The UI Speed slider overrides per story.
+    # Base pace sits low for an unhurried read; the ramp eases it further.
+    # The UI Speed slider overrides per story.
     sleep_default_speed: float = 0.78
     sleep_default_pause_ms: int = 1050  # inter-sentence silence
-    # Default delivery tone injected for ElevenLabs sleep chunks that don't open
-    # with an author-placed tag, so even untagged prose lands in a calm register
-    # (v3 prepends the mapped inline tag; v2 uses the matching numeric profile).
+    # Default delivery tone injected for sleep chunks that don't open with an
+    # author-placed tag, so even untagged prose lands in a calm register.
     # Empty string disables the injection.
     sleep_default_tone: str = "soothing"
-    # Author-placed [pause:N] breaths are clamped to this ceiling (ms) on every
-    # engine (the v2 native <break> tag is additionally clamped to 3 s by the API).
+    # Author-placed [pause:N] breaths are clamped to this ceiling (ms).
     sleep_pause_marker_max_ms: int = 5000
     # Default duration for a bare [pause] tag with no explicit ms value.
     sleep_pause_default_ms: int = 1000
-    # Per-chunk loudness normalization *before* stitching. v3 drifts in loudness
-    # between chunks under any settings; a single end-of-pipeline loudnorm can't
-    # undo level jumps baked into the stitched track. Normalizing each chunk to a
-    # common target first evens the drift out; the final master (sleep_target_lufs)
-    # then sets the absolute level. Target sits above the master so the master
-    # loudnorm doesn't fight it. Chunks shorter than the guard are skipped so
-    # near-silent fragments aren't amplified.
+    # Per-chunk loudness normalization *before* stitching. TTS models can drift in
+    # loudness between chunks; a single end-of-pipeline loudnorm can't undo level
+    # jumps baked into the stitched track. Normalizing each chunk to a common target
+    # first evens the drift out; the final master (sleep_target_lufs) then sets the
+    # absolute level. Chunks shorter than the guard are skipped so near-silent
+    # fragments aren't amplified.
     sleep_chunk_normalize: bool = True
     sleep_chunk_norm_lufs: float = -21.0
     sleep_chunk_norm_min_ms: int = 400
-    # Inject an ellipsis ("…") at sentence boundaries that lack one, giving the
-    # narrator a soft breathing pause at each break. Off by default (today's
-    # behaviour); applies only to ElevenLabs sleep (both v2 and v3 honour "…").
-    sleep_sentence_ellipsis: bool = False
     sleep_sample_rate: int = 44100
     sleep_channels: int = 2  # sleep masters are stereo
     sleep_target_lufs: float = -18.0  # EBU R128 integrated loudness target (calm but audible)

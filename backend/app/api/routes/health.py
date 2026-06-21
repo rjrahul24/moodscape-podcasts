@@ -18,5 +18,4 @@ def health(settings: SettingsDep) -> dict:
         "status": "ok",
         "providers": registry.available(),
         "ffmpeg": shutil.which("ffmpeg") is not None,
-        "elevenlabs_key_configured": bool(settings.elevenlabs_api_key),
     }

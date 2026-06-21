@@ -28,7 +28,6 @@ def client(tmp_path):
         also_export_wav=False,
         inter_turn_gap_ms=100,
         assets_dir=tmp_path / "assets",
-        elevenlabs_api_key=None,
     )
     app.dependency_overrides[get_settings] = lambda: settings
     registry.clear()
@@ -64,10 +63,6 @@ def test_voices_grouped_and_resilient(client):
     assert any(v["id"] == "fake-v1" for v in groups["fake"]["voices"])
     # Kokoro lists its static voices without any model load.
     assert groups["kokoro"]["voices"], "expected static Kokoro voices"
-    # ElevenLabs has no key in tests -> it reports an error but does NOT break
-    # the rest of the response.
-    assert groups["elevenlabs"]["error"] is not None
-    assert groups["elevenlabs"]["voices"] == []
 
 
 def test_generate_then_download_roundtrip(client):

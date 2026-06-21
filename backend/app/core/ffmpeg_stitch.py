@@ -6,9 +6,9 @@ into RAM and reallocates on every concatenation — fine for short podcasts, but
 
 Here each chunk is written to its own WAV on disk, then concatenated with
 ``ffmpeg -f concat`` which streams the inputs and uses constant memory regardless
-of episode length. We still use ``stitcher.numpy_to_segment`` /
-``bytes_to_segment`` to turn provider output into an ``AudioSegment``, but write
-it straight to disk instead of holding the whole episode in memory.
+of episode length. We still use ``stitcher.numpy_to_segment`` to turn provider
+output into an ``AudioSegment``, but write it straight to disk instead of holding
+the whole episode in memory.
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ def segment_to_wav_file(
 
     Normalizing every chunk to the same rate + channel count before concat is
     what lets a single master freely mix providers with different native rates
-    (ElevenLabs up to 44.1 kHz, local models 24 kHz).
+    (local models output at 24 kHz, target is typically 44.1 kHz).
 
     ``edge_fade_ms`` applies a short fade to each end of the chunk before export.
     The ffmpeg concat demuxer joins chunks with a hard cut; a hard cut across a

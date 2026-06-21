@@ -7,7 +7,7 @@ from app.core.text_processor import Pause, Speech, extract_emotion, plan_turn
 GAP_MIN, GAP_MAX = 80, 220
 
 
-def _plan(text, *, provider="elevenlabs", max_chars=2400, seed=0, inline_sfx=False):
+def _plan(text, *, provider="kokoro", max_chars=2400, seed=0):
     return plan_turn(
         text,
         provider=provider,
@@ -15,7 +15,6 @@ def _plan(text, *, provider="elevenlabs", max_chars=2400, seed=0, inline_sfx=Fal
         rng=random.Random(seed),
         gap_min_ms=GAP_MIN,
         gap_max_ms=GAP_MAX,
-        inline_sfx=inline_sfx,
     )
 
 
@@ -108,8 +107,3 @@ def test_sfx_tag_becomes_pause_by_default():
     assert all("[deep_breath]" not in s.text for s in items if isinstance(s, Speech))
 
 
-def test_sfx_tag_kept_inline_when_provider_performs_it():
-    # An inline-SFX-capable provider keeps the tag in the text (no extra pause).
-    items = _plan("Settle in [deep_breath] and rest.", inline_sfx=True)
-    assert all(not isinstance(it, Pause) for it in items)
-    assert any("[deep_breath]" in it.text for it in items if isinstance(it, Speech))

@@ -1,42 +1,16 @@
 """Decode provider audio, concatenate turns, and export the episode.
 
-Uses pydub (backed by ffmpeg). Cloud providers hand us encoded bytes (mp3/wav);
-local models hand us raw numpy samples. Both are converted to an
-``AudioSegment`` and normalized to a common sample rate before stitching, so a
-single episode can freely mix providers with different native rates.
+Uses pydub (backed by ffmpeg). Local models hand us raw numpy samples which
+are converted to an ``AudioSegment`` and normalized to a common sample rate
+before stitching.
 """
 
 from __future__ import annotations
 
-from io import BytesIO
 from pathlib import Path
 
 import numpy as np
 from pydub import AudioSegment
-
-
-def audio_container(output_format: str) -> str:
-    """Map a provider ``output_format`` string to a pydub/ffmpeg container.
-
-    e.g. ``"mp3_44100_128" -> "mp3"``, ``"wav_44100" -> "wav"``.
-    """
-    codec = output_format.split("_", 1)[0].lower()
-    if codec == "opus":
-        return "ogg"  # opus is carried in an ogg container
-    if codec == "pcm":
-        return "raw_pcm"
-    return codec
-
-
-def bytes_to_segment(data: bytes, output_format: str) -> AudioSegment:
-    """Decode encoded audio ``data`` (in ``output_format``) into an AudioSegment."""
-    container = audio_container(output_format)
-    if container == "raw_pcm":
-        sample_rate = int(output_format.split("_")[1])
-        return AudioSegment(
-            data=data, sample_width=2, frame_rate=sample_rate, channels=1,
-        )
-    return AudioSegment.from_file(BytesIO(data), format=container)
 
 
 def numpy_to_segment(samples: np.ndarray, sample_rate: int) -> AudioSegment:

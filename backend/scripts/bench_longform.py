@@ -17,8 +17,7 @@ Run from ``backend/``:
     uv run python scripts/bench_longform.py --providers f5 --minutes 30 60
     uv run python scripts/bench_longform.py --providers kokoro --minutes 5
 
-ElevenLabs is intentionally excluded — it's cloud, so this measures nothing local
-and would bill API calls. The first run per provider downloads/loads the model.
+The first run per provider downloads/loads the model.
 """
 
 from __future__ import annotations

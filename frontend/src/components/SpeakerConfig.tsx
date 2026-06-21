@@ -1,5 +1,4 @@
 import {
-  ELEVENLABS_MODELS,
   type ProviderVoices,
   type SeriesInfo,
   type SpeakerVoice,
@@ -14,7 +13,6 @@ interface Props {
   speakerVoices: Record<string, SpeakerVoice>;
   onProviderChange: (speaker: string, provider: string) => void;
   onVoiceChange: (speaker: string, voiceId: string) => void;
-  onModelChange: (speaker: string, modelId: string) => void;
   series: string;
   seriesList: SeriesInfo[];
   onSeriesChange: (slug: string) => void;
@@ -26,7 +24,6 @@ export function speakerLabel(i: number): string {
 }
 
 const PROVIDER_LABELS: Record<string, string> = {
-  elevenlabs: "ElevenLabs",
   kokoro: "Kokoro",
   f5: "F5",
 };
@@ -42,7 +39,6 @@ export function SpeakerConfig({
   speakerVoices,
   onProviderChange,
   onVoiceChange,
-  onModelChange,
   series,
   seriesList,
   onSeriesChange,
@@ -94,9 +90,6 @@ export function SpeakerConfig({
         {speakers.map((speaker) => {
           const selectedProvider = speakerVoices[speaker]?.provider ?? "";
           const group = providerVoices.find((p) => p.provider === selectedProvider);
-          const isElevenLabs = selectedProvider === "elevenlabs";
-          const selectedModel =
-            speakerVoices[speaker]?.model_id ?? ELEVENLABS_MODELS[0].id;
           return (
             <div key={speaker} className="speaker-row">
               <span className="speaker-tag">[{speaker}]</span>
@@ -115,21 +108,6 @@ export function SpeakerConfig({
                   </option>
                 ))}
               </select>
-
-              {isElevenLabs && (
-                <select
-                  className="provider-select"
-                  value={selectedModel}
-                  onChange={(e) => onModelChange(speaker, e.target.value)}
-                  title="ElevenLabs model"
-                >
-                  {ELEVENLABS_MODELS.map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.label}
-                    </option>
-                  ))}
-                </select>
-              )}
 
               <div className="voice-cell">
                 <VoiceSelect

@@ -10,7 +10,6 @@ import { ScriptInput } from "./components/ScriptInput";
 import { SleepStoryConfig } from "./components/SleepStoryConfig";
 import { SpeakerConfig, speakerLabel } from "./components/SpeakerConfig";
 import {
-  ELEVENLABS_MODELS,
   type AmbientBed,
   type ContentType,
   type GenerateResult,
@@ -37,7 +36,6 @@ export default function App() {
   // Sleep-story state
   const [sleepProvider, setSleepProvider] = useState("kokoro");
   const [sleepVoiceId, setSleepVoiceId] = useState("");
-  const [sleepModel, setSleepModel] = useState(ELEVENLABS_MODELS[0].id);
   const [sleepSpeed, setSleepSpeed] = useState(0.78);
   const [sleepPauseMs, setSleepPauseMs] = useState(900);
   const [sleepRamp, setSleepRamp] = useState(true);
@@ -69,16 +67,12 @@ export default function App() {
       .catch(() => setSeriesList([]));
   }, [loadVoices]);
 
-  const defaultProvider = providerVoices[0]?.provider ?? "elevenlabs";
+  const defaultProvider = providerVoices[0]?.provider ?? "kokoro";
 
   function handleProviderChange(speaker: string, provider: string) {
     setSpeakerVoices((prev) => ({
       ...prev,
-      [speaker]: {
-        provider,
-        voice_id: "",
-        model_id: provider === "elevenlabs" ? ELEVENLABS_MODELS[0].id : undefined,
-      },
+      [speaker]: { provider, voice_id: "" },
     }));
   }
 
@@ -88,18 +82,6 @@ export default function App() {
       [speaker]: {
         provider: prev[speaker]?.provider ?? defaultProvider,
         voice_id: voiceId,
-        model_id: prev[speaker]?.model_id,
-      },
-    }));
-  }
-
-  function handleModelChange(speaker: string, modelId: string) {
-    setSpeakerVoices((prev) => ({
-      ...prev,
-      [speaker]: {
-        provider: prev[speaker]?.provider ?? defaultProvider,
-        voice_id: prev[speaker]?.voice_id ?? "",
-        model_id: modelId,
       },
     }));
   }
@@ -154,7 +136,6 @@ export default function App() {
             prose_text: proseText,
             provider: sleepProvider,
             voice_id: sleepVoiceId,
-            model_id: sleepProvider === "elevenlabs" ? sleepModel : null,
             speed: sleepSpeed,
             pause_ms: sleepPauseMs,
             ramp: sleepRamp,
@@ -215,7 +196,6 @@ export default function App() {
           ambientBeds={ambientBeds}
           provider={sleepProvider}
           voiceId={sleepVoiceId}
-          modelId={sleepModel}
           speed={sleepSpeed}
           pauseMs={sleepPauseMs}
           ramp={sleepRamp}
@@ -223,7 +203,6 @@ export default function App() {
           proseText={proseText}
           onProviderChange={handleSleepProviderChange}
           onVoiceChange={setSleepVoiceId}
-          onModelChange={setSleepModel}
           onSpeedChange={setSleepSpeed}
           onPauseChange={setSleepPauseMs}
           onRampChange={setSleepRamp}
@@ -239,7 +218,6 @@ export default function App() {
             speakerVoices={speakerVoices}
             onProviderChange={handleProviderChange}
             onVoiceChange={handleVoiceChange}
-            onModelChange={handleModelChange}
             series={series}
             seriesList={seriesList}
             onSeriesChange={setSeries}

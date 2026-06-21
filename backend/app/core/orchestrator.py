@@ -18,12 +18,11 @@ import logging
 import random
 import re
 import shutil
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 
 from app.config import Settings
 from app.providers import reference_voice_registry, registry
-from app.providers.elevenlabs_provider import V2_MODEL
 from app.storage import ambient_registry, files, series_registry
 
 from . import ambient, chunker, f5_text, ffmpeg_stitch, podcast_music, qc, sleep_post, sleep_text, text_processor
@@ -60,25 +59,6 @@ def _wav_duration_ms(wav_path: Path) -> int:
 # can score (it needs the reference timbre to compare against).
 _CLONE_PROVIDERS = {"f5"}
 
-# Cross-chunk continuity context: how many trailing/leading characters of an
-# adjacent chunk we hand the model as previous_text/next_text. ElevenLabs uses it
-# to match pitch/tone across a hard chunk boundary.
-_CONTINUITY_CHARS = 200
-_BRACKET_TAG_RE = re.compile(r"\[[^\]]*\]")
-
-
-def _continuity_text(text: str, *, tail: bool) -> str:
-    """Trailing (``tail``) or leading slice of ``text`` for continuity context.
-
-    Bracket tags are stripped so a performed cue ([warmly]) never leaks into the
-    next chunk's context window and gets double-performed.
-    """
-    cleaned = re.sub(r"\s{2,}", " ", _BRACKET_TAG_RE.sub("", text)).strip()
-    if not cleaned:
-        return ""
-    return cleaned[-_CONTINUITY_CHARS:] if tail else cleaned[:_CONTINUITY_CHARS]
-
-
 def _noop(*, step: str, chunks_done: int, chunks_total: int) -> None:
     pass
 
@@ -87,7 +67,6 @@ def _chunk_overrides(settings: Settings) -> dict[str, int]:
     return {
         "kokoro": settings.kokoro_chunk_chars,
         "f5": settings.f5_chunk_chars,
-        "elevenlabs": settings.elevenlabs_chunk_chars,
     }
 
 
@@ -96,32 +75,22 @@ def _segment_format_for(
 ) -> str:
     if request_override:
         return request_override
-    if provider_name == "elevenlabs" and settings.elevenlabs_segment_format:
-        return settings.elevenlabs_segment_format
     return settings.segment_output_format
 
 
 # ── podcast pacing plan ──────────────────────────────────────────────────────
 @dataclass(frozen=True)
 class _Speech:
-    """One synthesis op plus the micro-pause that should follow it.
-
-    ``prev_text`` / ``next_text`` are the continuity context drawn from the
-    neighbouring speech ops (populated in a post-pass once the full op list is
-    known); they are forwarded only to continuity-capable providers.
-    """
+    """One synthesis op plus the micro-pause that should follow it."""
 
     text: str
     provider: str
     voice_id: str
-    model_id: str | None
     speaker: str
     turn_index: int
     emotion: str | None
     gap_after_ms: int
     section: str = "body"
-    prev_text: str = ""
-    next_text: str = ""
 
 
 @dataclass(frozen=True)
@@ -152,35 +121,18 @@ def _draw_speed(rng: random.Random, settings: Settings) -> float:
 
 def _podcast_voice_settings(
     provider, op: "_Speech", rng: random.Random, settings: Settings,
-    *, seed: int | None,
 ) -> dict | None:
-    """Per-chunk voice_settings, tailored to the provider's declared capabilities.
+    """Per-chunk voice_settings for local models.
 
     Speed-aware local models (``consumes_local_speed``) get a jittered rate
-    multiplier. Native-speed cloud providers (``has_native_speed``, i.e.
-    ElevenLabs) additionally get a content-type hint + optional model override so
-    the provider can pick the right v2/v3 profile, plus cross-chunk continuity
-    context and an optional deterministic ``seed`` when the provider advertises
-    those. Returns ``None`` when nothing applies so providers fall back to their
-    defaults (pre-feature behaviour).
+    multiplier. Returns ``None`` when nothing applies so providers fall back to
+    their defaults.
     """
     vs: dict = {}
     if op.emotion:
         vs["emotion"] = op.emotion
-    if provider.has_native_speed:
-        vs["content_type"] = "podcast"
-        if op.model_id:
-            vs["model_id"] = op.model_id
-        vs["speed"] = settings.podcast_default_speed
-    elif provider.consumes_local_speed:
+    if provider.consumes_local_speed:
         vs["speed"] = _draw_speed(rng, settings)
-    if getattr(provider, "accepts_continuity", False):
-        if op.prev_text:
-            vs["previous_text"] = op.prev_text
-        if op.next_text:
-            vs["next_text"] = op.next_text
-        if seed is not None:
-            vs["seed"] = seed
     return vs or None
 
 
@@ -191,11 +143,9 @@ def _sleep_tone(text: str, settings: Settings) -> tuple[str | None, str]:
     """Resolve ``(emotion, text)`` for a sleep segment.
 
     A leading author tone tag that names a known emotion (``[calm] …``,
-    ``[warm] …``) becomes the segment's emotion and is *removed* from the text, so
-    both engines honor it through one canonical path: v3 performs the mapped inline
-    tag, v2 maps it to a warmer numeric profile (it can't perform tags). A leading
-    non-emotion cue (``[sighs] …``) is left inline for v3 to perform and no default
-    is imposed. Otherwise the configured ``sleep_default_tone`` is injected so even
+    ``[warm] …``) becomes the segment's emotion and is *removed* from the text.
+    A leading non-emotion cue (``[sighs] …``) is left inline and no default is
+    imposed. Otherwise the configured ``sleep_default_tone`` is injected so even
     untagged prose lands in a calm register.
     """
     match = _LEADING_TAG_RE.match(text)
@@ -207,53 +157,25 @@ def _sleep_tone(text: str, settings: Settings) -> tuple[str | None, str]:
     return (settings.sleep_default_tone or None), text
 
 
-def _supports_native_breaks(provider_name: str, model_id: str, settings: Settings) -> bool:
-    """True when ``[pause:N]`` should ride as a native ElevenLabs ``<break>`` tag.
-
-    Only ElevenLabs Multilingual v2 honours ``<break>``; v3 and the local engines
-    splice real silence instead. Gated by ``elevenlabs_v2_native_breaks``.
-    """
-    return (
-        provider_name == "elevenlabs"
-        and model_id == V2_MODEL
-        and settings.elevenlabs_v2_native_breaks
-    )
-
-
 def _sleep_voice_settings(
-    provider, request: SleepStoryRequest, speed: float, settings: Settings,
-    *, prev_text: str = "", next_text: str = "", emotion: str | None = None,
+    provider, speed: float, settings: Settings,
+    *, emotion: str | None = None,
 ) -> dict | None:
-    """Sleep-story voice_settings, tailored to the provider's capabilities.
+    """Sleep-story voice_settings for local models.
 
-    ElevenLabs (``has_native_speed``) gets a calm content-type profile + native
-    (per-chunk ramped) speed + optional model override, plus cross-chunk
-    continuity context and an optional ``seed``. Plain local models
-    (``consumes_local_speed``) get the slow ``speed`` as a rate multiplier.
-    Returns ``None`` when nothing applies.
+    Local models (``consumes_local_speed``) get the slow ``speed`` as a rate
+    multiplier. Returns ``None`` when nothing applies.
 
     ``speed`` is the effective per-chunk speed (already ramped by the caller).
     """
-    if provider.has_native_speed:
-        vs: dict = {"content_type": "sleep", "speed": speed}
+    if provider.consumes_local_speed:
+        vs: dict = {"speed": speed}
         if emotion:
             vs["emotion"] = emotion
-        if request.model_id:
-            vs["model_id"] = request.model_id
-        if getattr(provider, "accepts_continuity", False):
-            if prev_text:
-                vs["previous_text"] = prev_text
-            if next_text:
-                vs["next_text"] = next_text
-            if request.seed is not None:
-                vs["seed"] = request.seed
-        return vs
-    if provider.consumes_local_speed:
-        vs_local: dict = {"speed": speed}
         if provider.name == "f5":
-            vs_local["nfe_step"] = settings.f5_sleep_nfe_step
-            vs_local["content_type"] = "sleep"
-        return vs_local
+            vs["nfe_step"] = settings.f5_sleep_nfe_step
+            vs["content_type"] = "sleep"
+        return vs
     return None
 
 
@@ -307,7 +229,6 @@ def _build_podcast_ops(
             rng=rng,
             gap_min_ms=settings.podcast_intra_sentence_gap_ms_min,
             gap_max_ms=settings.podcast_intra_sentence_gap_ms_max,
-            inline_sfx=registry.get(assignment.provider).accepts_inline_sfx,
         )
         for item in items:
             if isinstance(item, text_processor.Pause):
@@ -319,7 +240,6 @@ def _build_podcast_ops(
                         text=item.text,
                         provider=assignment.provider,
                         voice_id=assignment.voice_id,
-                        model_id=assignment.model_id,
                         speaker=turn.speaker,
                         turn_index=turn.index,
                         emotion=item.emotion,
@@ -328,25 +248,6 @@ def _build_podcast_ops(
                     )
                 )
         prev_turn_index = turn.index
-    return _link_continuity(ops)
-
-
-def _link_continuity(ops: list) -> list:
-    """Populate each ``_Speech``'s prev/next continuity context from its neighbours.
-
-    Context flows across the whole rendered sequence (including speaker changes),
-    matching how the research stitches turns; intervening ``_Silence`` ops are
-    skipped. Bracket tags are stripped by ``_continuity_text``.
-    """
-    speech_idx = [i for i, op in enumerate(ops) if isinstance(op, _Speech)]
-    for pos, i in enumerate(speech_idx):
-        prev_text = ""
-        next_text = ""
-        if pos > 0:
-            prev_text = _continuity_text(ops[speech_idx[pos - 1]].text, tail=True)
-        if pos < len(speech_idx) - 1:
-            next_text = _continuity_text(ops[speech_idx[pos + 1]].text, tail=False)
-        ops[i] = replace(ops[i], prev_text=prev_text, next_text=next_text)
     return ops
 
 
@@ -645,7 +546,7 @@ def _run_podcast(
             synth_text = op.text
             if op.provider == "f5":
                 synth_text = f5_text.normalize_for_f5(synth_text)
-            vs = _podcast_voice_settings(provider, op, rng, settings, seed=request.seed)
+            vs = _podcast_voice_settings(provider, op, rng, settings)
             fmt = _segment_format_for(op.provider, settings, request_override=req_format)
             seg = provider.synthesize(
                 synth_text, op.voice_id, output_format=fmt, voice_settings=vs
@@ -776,13 +677,8 @@ def _run_sleep(
             )
 
     # Spell out standalone numbers so the narrator never reads bare digits in a
-    # clipped, transactional tone (the provider's apply_text_normalization handles
-    # the rest server-side).
+    # clipped, transactional tone.
     prose = sleep_text.spell_numbers(request.prose_text)
-    # Soft breathing pause at each sentence break (ElevenLabs honours "…" on both
-    # v2 and v3). Opt-in; applied before chunking so it rides into every chunk.
-    if provider_name == "elevenlabs" and settings.sleep_sentence_ellipsis:
-        prose = sleep_text.inject_sentence_pauses(prose)
     if provider_name == "kokoro":
         prose = sleep_text.punctuation_to_pauses(
             prose,
@@ -800,11 +696,6 @@ def _run_sleep(
     out_dir = files.job_dir(settings.output_dir, job_id)
     work_dir = out_dir / "_chunks"
     work_dir.mkdir(parents=True, exist_ok=True)
-
-    # Engine resolution: only ElevenLabs v2 renders [pause:N] as a native <break>;
-    # every other engine splits the chunk here and splices real silence.
-    el_model = request.model_id or settings.elevenlabs_sleep_model
-    native_breaks = _supports_native_breaks(provider_name, el_model, settings)
 
     concat_paths: list[Path] = []
     narration_ms = 0
@@ -829,30 +720,19 @@ def _run_sleep(
         if i > 0:
             _splice_silence(pause_ms)  # inter-sentence pause between chunks
 
-        prev_text = _continuity_text(plan[i - 1].text, tail=True) if i > 0 else ""
-        next_text = (
-            _continuity_text(plan[i + 1].text, tail=False) if i < total - 1 else ""
+        # Author-placed [pause:N] breaths are split into sub-segments separated
+        # by spliced silence so the breath is honored everywhere.
+        pieces = sleep_text.split_pauses(
+            chunk.text,
+            max_ms=settings.sleep_pause_marker_max_ms,
+            default_ms=settings.sleep_pause_default_ms,
         )
-
-        # Author-placed [pause:N] breaths. v2 keeps the marker inline (translated to
-        # a native <break> by the provider); other engines split into sub-segments
-        # separated by spliced silence so the breath is honored everywhere.
-        if native_breaks:
-            pieces = [(chunk.text, 0)]
-        else:
-            pieces = sleep_text.split_pauses(
-                chunk.text,
-                max_ms=settings.sleep_pause_marker_max_ms,
-                default_ms=settings.sleep_pause_default_ms,
-            )
 
         for j, (piece_text, pause_after_ms) in enumerate(pieces):
             tone, piece_text = _sleep_tone(piece_text, settings)
             if piece_text.strip():
                 voice_settings = _sleep_voice_settings(
-                    provider, request, speed, settings,
-                    prev_text=prev_text if j == 0 else "",
-                    next_text=next_text if j == len(pieces) - 1 else "",
+                    provider, speed, settings,
                     emotion=tone,
                 )
                 seg = provider.synthesize(

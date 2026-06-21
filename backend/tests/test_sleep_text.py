@@ -88,53 +88,6 @@ def test_split_pauses_mixed_bare_and_explicit():
 
 
 # ---------------------------------------------------------------------------
-# inject_sentence_pauses
-# ---------------------------------------------------------------------------
-
-
-def test_inject_sentence_pauses_adds_ellipsis_at_boundaries():
-    assert sleep_text.inject_sentence_pauses("The sky is dark. Stars appear.") == (
-        "The sky is dark.… Stars appear."
-    )
-
-
-def test_inject_sentence_pauses_handles_question_and_exclaim():
-    assert sleep_text.inject_sentence_pauses("Are you there? Rest now! Sleep.") == (
-        "Are you there?… Rest now!… Sleep."
-    )
-
-
-def test_inject_sentence_pauses_leaves_existing_ellipsis():
-    text = "drifting... softly now."
-    assert sleep_text.inject_sentence_pauses(text) == text
-
-
-def test_inject_sentence_pauses_leaves_unicode_ellipsis():
-    text = "drifting… softly now."
-    assert sleep_text.inject_sentence_pauses(text) == text
-
-
-def test_inject_sentence_pauses_ignores_lowercase_continuation():
-    # An abbreviation like "Dr." followed by a lowercase word is not a boundary.
-    text = "Meet Dr. roberts by the lake."
-    assert sleep_text.inject_sentence_pauses(text) == text
-
-
-def test_inject_sentence_pauses_skips_inside_bracket_tags():
-    # A period inside a tag (rare, but possible) must not trigger a split, and a
-    # real boundary after a tag still gets the ellipsis.
-    text = "[calm] The night fell. Stars came out."
-    assert sleep_text.inject_sentence_pauses(text) == (
-        "[calm] The night fell.… Stars came out."
-    )
-
-
-def test_inject_sentence_pauses_noop_without_boundaries():
-    text = "One long unbroken calming sentence with no breaks"
-    assert sleep_text.inject_sentence_pauses(text) == text
-
-
-# ---------------------------------------------------------------------------
 # punctuation_to_pauses
 # ---------------------------------------------------------------------------
 

@@ -79,7 +79,6 @@ app/
     base.py          TTSProvider ABC (synthesize -> AudioSegment)
     registry.py      name -> provider instance
     bootstrap.py     construct + register all providers from Settings
-    elevenlabs_provider.py
     kokoro_provider.py     (reads voice_settings["speed"] for per-job speed)
     f5_provider.py         (reads voice_settings["speed"] for per-job speed)
     reference_voice_registry.py  (F5 clone-voice scan)
@@ -96,35 +95,21 @@ app/
 
 - `name: str`
 - **Capability flags** — `consumes_local_speed` (Kokoro, F5: apply a numeric
-  `speed` as an internal rate multiplier), `has_native_speed` (ElevenLabs:
-  accepts a model-native `speed`, 0.7–1.2),
-  `accepts_inline_sfx` (performs inline breath/SFX and delivery tags rather than
-  speaking them; **True on ElevenLabs** — v3 performs them, so the text processor
-  leaves them in the text; default False → tags map to short pauses), and
-  `accepts_continuity` (True on ElevenLabs: takes `previous_text`/`next_text`
-  context so prosody flows across chunk boundaries). The orchestrator branches on
-  these flags instead of hardcoding provider names, so behaviour stays "split per
-  model" without name checks leaking up the stack.
+  `speed` as an internal rate multiplier). The orchestrator branches on this flag
+  instead of hardcoding provider names.
 - `list_voices() -> list[Voice]` — **cheap, dependency-light** (populates the UI;
   must not import heavy ML libs or load models).
 - `synthesize(text, voice_id, *, output_format, voice_settings=None) -> AudioSegment`
 
 ### Why `AudioSegment` is the contract
 
-Cloud providers emit **encoded bytes** (mp3/wav); local models emit **raw numpy**
-samples at a fixed rate. Returning a decoded pydub `AudioSegment` unifies them so
-the engine and stitcher work in one currency:
+Local models emit **raw numpy** samples at a fixed rate. Returning a decoded
+pydub `AudioSegment` unifies them so the engine and stitcher work in one currency:
 
-- ElevenLabs: `synthesize_bytes(...)` → `stitcher.bytes_to_segment(bytes, fmt)`.
 - Kokoro / F5: numpy → `stitcher.numpy_to_segment(samples, 24000)`.
 
-`output_format` is meaningful to cloud providers (it selects request quality);
-local providers ignore it (they have a fixed native rate). ElevenLabs uses a
-per-provider override (`ELEVENLABS_SEGMENT_FORMAT`, default `mp3_44100_192` —
-the best format Creator tier offers) to raise the intermediate quality before
-mastering. On a **Pro** plan, set `pcm_44100` for a truly lossless intermediate;
-`bytes_to_segment` handles `pcm_*` formats by constructing the `AudioSegment`
-from raw 16-bit mono samples.
+`output_format` is passed through the interface but local providers ignore it
+(they have a fixed native rate).
 
 ### Per-job parameters via `voice_settings`
 
@@ -133,37 +118,19 @@ orchestrator passes a `voice_settings` dict, and providers read what they
 understand (ignoring keys they don't). The keys today:
 
 - **`speed`** — sleep stories pass the configured slow speed; podcasts pass a
-  fixed base speed for cloud providers (`has_native_speed`) or a per-chunk
-  jittered speed for local models (`consumes_local_speed`). ElevenLabs applies
-  it as a model-native speed clamped to 0.7–1.2; local models use it as a rate
-  multiplier.
-- **`emotion`** — a recognized podcast tone tag. Kokoro/F5 multiply it into their
-  rate via `core/emotion.py`. ElevenLabs handles it per model: **v2** maps it to a
-  numeric `stability/similarity_boost/style` profile; **v3** performs it as an
-  *inline audio tag* prepended to the chunk text (e.g. `[excited]`).
-- **`content_type`** (`"podcast"`/`"sleep"`) and **`model_id`** — sent to
-  ElevenLabs only. They let the provider pick the right tailoring: an expressive
-  profile for podcasts vs a calm, high-stability profile for sleep, and the
-  selected generation (v2 vs v3, per speaker / per sleep story). Local providers
-  ignore them.
-- **`previous_text` / `next_text` / `seed`** — sent to continuity-capable
-  providers (`accepts_continuity`, i.e. ElevenLabs) only. The orchestrator fills
-  the first two with the trailing/leading text of the adjacent chunks (≤200 chars,
-  bracket tags stripped) so the model matches pitch/tone across a hard boundary;
-  `seed` (from the request) makes a re-render reproducible. The provider forwards
-  them as **top-level request-body fields**, not `voice_settings` keys.
+  per-chunk jittered speed for local models (`consumes_local_speed`). Local models
+  use it as a rate multiplier.
+- **`emotion`** — a recognized tone tag. Kokoro/F5 multiply it into their
+  rate via `core/emotion.py`.
+- **`nfe_step`** / **`content_type`** — F5-specific sleep overrides (nfe_step
+  controls quality/speed trade-off; content_type signals sleep context).
 
-ElevenLabs consumes the hint keys (`content_type`/`model_id`/`emotion`/`speed`/
-`previous_text`/`next_text`/`seed`) when building the request body, so they never
-leak into the API's `voice_settings`. It also always sends `use_speaker_boost`
-(configurable) and `apply_text_normalization` (default `"auto"`), and is
-model-aware about inline `[bracket]` tags: **v3** keeps them (performed), **v2**
-strips them before the read. Chunking, pauses, and pacing never reach providers —
-they live in the orchestrator and `core/text_processor.py`.
+Chunking, pauses, and pacing never reach providers — they live in the orchestrator
+and `core/text_processor.py`.
 
 ### Sample-rate normalization
 
-Providers have different native rates (ElevenLabs up to 44.1kHz, locals 24kHz).
+Local providers output at 24kHz.
 The disk stitcher (`ffmpeg_stitch.segment_to_wav_file`) normalizes every chunk to
 the target rate + channel count before writing it, so a single episode can freely
 mix providers. (The legacy in-memory `stitcher.stitch` does the same for the old
@@ -182,32 +149,7 @@ model is cached on the instance as a lazy singleton). Consequences:
 
 ## Providers
 
-### ElevenLabs (cloud)
-REST via httpx. `list_voices()` → `GET /v1/voices` (optionally filtered by
-`VOICE_CATALOG`). `synthesize` → `POST /v1/text-to-speech/{voice}` with
-`output_format`, decoded to an `AudioSegment`. Needs `ELEVENLABS_API_KEY`.
-
-`_prepare` tailors each call to **two axes** — the selected model and the content
-type — both supplied via `voice_settings`:
-
-- **v2** (`eleven_multilingual_v2`): numeric `stability/similarity_boost/style`.
-  A tone tag maps to `EMOTION_PROFILES`; otherwise a per-content-type base
-  profile (`V2_CONTENT_BASE`) — expressive-but-unforced (style 0.0) for podcasts,
-  calm at the research sweet spot (stability 0.70) for sleep. Native `speed` is
-  clamped to 0.7–1.2. Inline `[bracket]` tags are **stripped** (v2 can't perform
-  them, so they're never spoken).
-- **v3** (`eleven_v3`, the default): discrete `stability` (Creative 0.0 / Natural
-  0.5 / Robust 1.0) — Natural for podcasts (Creative when `[excited]`), Robust for
-  sleep — the recognized tone tag is **performed inline** via `V3_AUDIO_TAGS`, and
-  any other `[bracket]` cue in the text is **kept** for the model to perform.
-
-Both paths always send `use_speaker_boost` and (top-level) `apply_text_normalization`,
-plus `previous_text`/`next_text`/`seed` when supplied. The model is chosen from
-`model_id` (per speaker / per sleep story) or, when unset, the provider's
-per-content default (`ELEVENLABS_PODCAST_MODEL` / `ELEVENLABS_SLEEP_MODEL`, both
-**`eleven_v3`**). `ELEVENLABS_CHUNK_CHARS=1000` stays under v3's 5k cap.
-
-### Kokoro (local)
+### Kokoro (local, default)
 `kokoro.KPipeline(lang_code, repo_id="hexgrad/Kokoro-82M", trf=True, device)`.
 CPU on Apple Silicon (MPS causes bus errors), CUDA if available. American voices
 use `lang_code="a"`, British (`bf_*`/`bm_*`) use a second `lang_code="b"`
@@ -341,7 +283,7 @@ The job's `result` is a `GenerateResult` (same shape as the sync endpoint), so
 `chunker.py` splits text into bounded chunks **before** any provider call so
 Kokoro stays under its 510 phoneme-token cap (it rushes well before that) and F5
 stays within ~30s/pass. Budgets are **character**-based per provider
-(`KOKORO_CHUNK_CHARS=400`, `F5_CHUNK_CHARS=350`, `ELEVENLABS_CHUNK_CHARS=1000`)
+(`KOKORO_CHUNK_CHARS=400`, `F5_CHUNK_CHARS=250`)
 — the "175/250/450 token" references are phonemized tokens, which track
 characters far better than BPE tokens, and the research's own guidance is
 "~400 chars for Kokoro". The chunker is pure (no provider/ML imports) and splits
@@ -368,10 +310,8 @@ Each turn becomes an ordered list of `Speech`/`Pause` items:
   (`PODCAST_INTRA_SENTENCE_GAP_MS_MIN..MAX`, default 80–220 ms);
 - **explicit `[pause:600]` / `[pause:600ms]`** tags → exact silence at that point;
 - **breath / SFX tags** (`[breath]`/`[deep_breath]`/`[sigh]`, durations in
-  `emotion.SFX_PAUSE_MS`): for a provider that can perform them inline
-  (`accepts_inline_sfx`, passed into `plan_turn`) the tag stays in the text;
-  otherwise it's rewritten to a short `[pause:N]` so the beat lands and no model
-  speaks the literal tag. No current provider sets the flag → short-pause mapping;
+  `emotion.SFX_PAUSE_MS`): rewritten to a short `[pause:N]` so the beat lands
+  and no model speaks the literal tag;
 - a **leading tone tag** (`[excited]`/`[calm]`/`[soothing]`/`[reflective]`/`[warm]`/
   `[sad]`/`[whispering]`/`[neutral]`/`[dreamy]`/`[tender]`) lifted off the text and attached as `emotion`
   (stripped before synthesis; any other `[...]` passes through unchanged);
@@ -406,26 +346,15 @@ in/out → 44.1 kHz **stereo**) → if an ambient bed is chosen, `ambient.mix` s
 and floats the bed under the voice (see below) → exports M4A + WAV. None of this
 touches the podcast path.
 
-**Engine tuning (ElevenLabs).** Both generations are first-class for sleep and
-selectable in the UI. **v3** runs at **Natural** stability
-(`elevenlabs_sleep_v3_stability`, default 0.5) — *not* Robust — so the calming
-inline tags (`[calm]`, `[warmly]`) stay responsive. **v2** keeps its numeric
-profile, cross-chunk continuity, seed, and best-in-class text normalization. A
-**default calm tone** (`sleep_default_tone`, default `soothing`) is injected for
+A **default calm tone** (`sleep_default_tone`, default `soothing`) is injected for
 every chunk that doesn't already open with an author-placed tag, so even untagged
-prose lands in a calm register (v3 → an inline `[calm]`; v2 → the matching numeric
-profile). A **leading author tone tag** that names a known emotion (`[calm] …`,
-`[warm] …`) is extracted by `_sleep_tone` and applied as the segment's emotion on
-**both** engines — v3 performs the mapped inline tag, v2 (which can't perform tags)
-maps it to a warmer numeric profile — then removed from the text so it is never
-spoken or double-tagged. A leading non-emotion cue (`[sighs]`) stays inline for v3.
+prose lands in a calm register. A **leading author tone tag** that names a known
+emotion (`[calm] …`, `[warm] …`) is extracted by `_sleep_tone` and applied as the
+segment's emotion, then removed from the text so it is never spoken.
 
 **Deliberate breaths (`[pause:N]` / `[pause]`).** Authors can place `[pause:800]`,
 `[pause:800ms]`, or bare `[pause]` markers. A bare `[pause]` uses the configured
-default (`sleep_pause_default_ms`, default 1000 ms). On **ElevenLabs v2** the
-provider rewrites them to native `<break time>` tags (model-aware prosody, capped
-at the API's 3 s; `elevenlabs_v2_native_breaks`; bare `[pause]` → 1 s). On **v3
-and the local engines** (which have no break tags) the orchestrator splits the
+default (`sleep_pause_default_ms`, default 1000 ms). The orchestrator splits the
 chunk on the marker and splices real silence via `sleep_text.split_pauses` (clamped
 to `sleep_pause_marker_max_ms`). These stack on top of the inter-sentence + ramp
 pauses.
@@ -445,25 +374,15 @@ dB under (`ambient_bed_gain_db`), fades it, and — when `ambient_duck` is on �
 narration) so it dips while the narrator speaks and breathes back up in the gaps.
 
 **Per-chunk loudness normalization** (`sleep_chunk_normalize`, default on).
-ElevenLabs v3 drifts in loudness from chunk to chunk under any settings, and a
-single end-of-pipeline `loudnorm` can't undo level jumps already baked into the
-stitched track. So each speech chunk is normalized to a common target
+TTS models can drift in loudness from chunk to chunk, and a single end-of-pipeline
+`loudnorm` can't undo level jumps already baked into the stitched track. So each
+speech chunk is normalized to a common target
 (`ffmpeg_stitch.normalize_loudness`, `sleep_chunk_norm_lufs`, default −21 LUFS,
 which sits above the −18 LUFS master so the master pass doesn't fight it) *before*
 the concat; the master then only sets the absolute level. Chunks shorter than
 `sleep_chunk_norm_min_ms` (400 ms) are skipped so near-silent fragments aren't
 amplified. `loudnorm` upsamples internally, so the chunk is re-pinned to the sleep
 sample rate to keep concat stream params identical.
-
-**Anti-drift tagging (ElevenLabs v3, both opt-in).** Two knobs counter v3's
-tendency to slide from a calm bedtime register toward an "audiobook narrator"
-read over a long story. **`elevenlabs_sleep_v3_pacing_tag`** (empty = off) is a
-pacing tag (e.g. `[slowly]`) *reasserted on every chunk* by `_prepare_v3`,
-landing after the emotion tag (`[calm] [slowly] …`). **`sleep_sentence_ellipsis`**
-(default off) runs `sleep_text.inject_sentence_pauses` before chunking to add a
-soft `…` breathing pause at sentence breaks that lack one (honored by v2 and v3,
-never inserted inside a `[…]` cue). Both are ElevenLabs-sleep only and ship
-defaults-off so existing renders are unchanged until enabled.
 
 **Progressive ramp-down** (`SleepStoryRequest.ramp`, default on, `_sleep_ramp`):
 per chunk, `speed` eases linearly from the baseline to
@@ -529,13 +448,12 @@ The legacy synchronous `POST /api/generate` remains (it adapts `GenerateRequest`
 
 ## Configuration (Settings)
 
-Loaded from `backend/.env` (see `.env.example`). Highlights: `ELEVENLABS_API_KEY`,
-`ELEVENLABS_MODEL_ID`, `ELEVENLABS_PODCAST_MODEL`, `ELEVENLABS_SLEEP_MODEL`,
-`VOICE_CATALOG`, `SEGMENT_OUTPUT_FORMAT`, `FINAL_FORMAT` (default `"m4a"`),
+Loaded from `backend/.env` (see `.env.example`). Highlights:
+`SEGMENT_OUTPUT_FORMAT`, `FINAL_FORMAT` (default `"m4a"`),
 `ALSO_EXPORT_WAV` (default `True`), `INTER_TURN_GAP_MS`, `OUTPUT_DIR`, `TARGET_SAMPLE_RATE`,
 `ASSETS_DIR`, `KOKORO_SPEED`, `F5_SPEED`, `F5_DEVICE`, `F5_DTYPE`, `F5_NFE_STEP`,
-`F5_CFG_STRENGTH`, `F5_SWAY_COEF`. **Chunking:** `KOKORO_CHUNK_CHARS`, `F5_CHUNK_CHARS`,
-`ELEVENLABS_CHUNK_CHARS`. **Podcast pacing:** `PODCAST_DEFAULT_SPEED`,
+`F5_CFG_STRENGTH`, `F5_SWAY_COEF`. **Chunking:** `KOKORO_CHUNK_CHARS`, `F5_CHUNK_CHARS`.
+**Podcast pacing:** `PODCAST_DEFAULT_SPEED`,
 `PODCAST_SPEED_JITTER`, `PODCAST_INTRA_SENTENCE_GAP_MS_MIN`,
 `PODCAST_INTRA_SENTENCE_GAP_MS_MAX`, `PODCAST_TURN_GAP_JITTER`. **Sleep stories:**
 `SLEEP_DEFAULT_SPEED`,
@@ -572,9 +490,8 @@ entry to `Icon.tsx`.
 
 `backend/tests/` (pytest) runs without any model downloads — local providers are
 exercised against fake `kokoro`/`f5_tts`/`torch` modules injected into
-`sys.modules`, ElevenLabs against mocked httpx (respx), and the orchestrator/jobs
-against the network-free `FakeProvider` (which records `voice_settings` so
-per-job speed is asserted). Coverage: chunking, the job store, the orchestrator
+`sys.modules`, and the orchestrator/jobs against the network-free `FakeProvider`
+(which records `voice_settings` so per-job speed is asserted). Coverage: chunking, the job store, the orchestrator
 (podcast + sleep), the jobs API (`POST /api/jobs` → poll to `succeeded`, an SSE
 read, download round-trip), the ambient registry, sleep filtergraph construction,
 script parsing, stitching, each provider, and resilient grouped voices.

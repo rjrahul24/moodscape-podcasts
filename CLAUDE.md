@@ -26,7 +26,7 @@ on disk via the ffmpeg concat demuxer.
   **Python 3.13** (`.python-version`) — the local-TTS stack (Kokoro/F5 → spacy)
   has no cp314 wheels yet.
 - **Frontend:** React + TypeScript (Vite), in `frontend/`.
-- **Providers:** ElevenLabs (cloud), Kokoro (local), F5 (local, voice cloning).
+- **Providers:** Kokoro (local), F5 (local, voice cloning). Open-source only.
 
 ## Repo map
 
@@ -51,7 +51,7 @@ which proxies `/api` → `:8000`). Both must be running.
 **One-time install:**
 
 ```bash
-cd backend  && cp .env.example .env && uv sync --extra dev  # ELEVENLABS_API_KEY if using ElevenLabs; deps multi-GB
+cd backend  && cp .env.example .env && uv sync --extra dev  # deps multi-GB (local TTS models)
 cd frontend && npm install
 ```
 
@@ -78,8 +78,8 @@ npm run dev                              # http://localhost:5173 (proxies /api �
 ## Key conventions (don't break these)
 
 - **Providers return a pydub `AudioSegment`** from `synthesize(...)`, not bytes.
-  Cloud providers decode their encoded bytes; local models convert numpy via
-  `stitcher.numpy_to_segment`. The engine normalizes sample rates before stitching.
+  Local models convert numpy via `stitcher.numpy_to_segment`. The engine
+  normalizes sample rates before stitching.
 - **Heavy ML imports are lazy.** Provider constructors and `list_voices()` must
   NOT import torch/kokoro/f5 — only `synthesize()` may. This keeps the app
   bootable and the voice dropdowns populated even if a heavy lib is missing;
@@ -89,9 +89,8 @@ npm run dev                              # http://localhost:5173 (proxies /api �
   parser, orchestrator, stitcher, API, and frontend should not need changes.
 - **Per-job tuning rides `voice_settings`.** Don't change the `synthesize`
   signature for per-job params — pass them in the `voice_settings` dict (today:
-  `speed` and `emotion`, read by Kokoro/F5; `emotion` also mapped to a native
-  profile by ElevenLabs). The orchestrator injects `speed` only for local
-  providers; chunking, pauses, and pacing stay in the orchestrator
+  `speed` and `emotion`, read by Kokoro/F5). The orchestrator injects `speed`
+  for local providers; chunking, pauses, and pacing stay in the orchestrator
   (`core/text_processor.py`), never in providers.
 - **No meditation processing on podcasts — with one sanctioned exception.** Copy
   only the core text→audio path from any reference implementation. The full

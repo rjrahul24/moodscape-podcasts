@@ -1,10 +1,9 @@
 """Sleep-story text preprocessing: number spelling and punctuation-to-pause conversion.
 
 The AI reads bare digits in a clipped, transactional tone ("twelve thirty-four"
-becomes a rushed "one-two-three-four"), which breaks a hypnotic atmosphere. The
-provider's ``apply_text_normalization="auto"`` handles most of this server-side,
-but spelling numbers locally too keeps the cadence calm regardless of model and
-gives a deterministic, testable result.
+becomes a rushed "one-two-three-four"), which breaks a hypnotic atmosphere.
+Spelling numbers locally keeps the cadence calm regardless of model and gives a
+deterministic, testable result.
 
 Scope is deliberately small and dependency-free: standalone non-negative integers
 up to 999,999 (more than enough for a bedtime story). Numbers glued to letters
@@ -36,8 +35,7 @@ _TENS = [
 _INT_RE = re.compile(r"(?<![A-Za-z0-9])(\d{1,3}(?:,\d{3})+|\d+)(?![A-Za-z0-9])")
 
 # Author-placed deliberate-breath marker: [pause:800], [pause:800ms], or bare
-# [pause] (spaces and case tolerated). The app renders this as a real silence —
-# a native <break> on ElevenLabs v2, inserted silence on every other engine.
+# [pause] (spaces and case tolerated). The app renders this as spliced silence.
 # Bare [pause] (no duration) uses a caller-supplied default.
 _PAUSE_RE = re.compile(r"\[\s*pause\s*(?::\s*(\d+)\s*(?:ms)?\s*)?\s*\]", re.IGNORECASE)
 # The opening of a pause marker, anchored to the end of the text seen so far —
@@ -84,45 +82,6 @@ def spell_numbers(text: str) -> str:
     return _INT_RE.sub(repl, text)
 
 
-# A sentence boundary that should get a soft breathing ellipsis: terminal
-# punctuation, NOT already followed by an ellipsis/em-dash, then whitespace, then
-# the start of the next sentence (open quote/bracket/paren or a capital letter).
-_SENTENCE_BOUNDARY_RE = re.compile(
-    r"""(?<=[.!?])      # a sentence-ending mark
-        (?<!\.\.\.)     # but not the tail of "..."
-        [ \t]+          # inline space (don't touch paragraph breaks / newlines)
-        (?=[\[\"'(“‘A-Z])  # next sentence opens here
-    """,
-    re.VERBOSE,
-)
-
-# A bracket tag like [calm] or [pause:800] — boundaries inside one are skipped so
-# we never split a delivery cue.
-_BRACKET_SPAN_RE = re.compile(r"\[[^\]]*\]")
-
-
-def inject_sentence_pauses(text: str) -> str:
-    """Insert an ellipsis ("…") at sentence boundaries that lack one.
-
-    Gives the narrator a soft breathing pause at each sentence break (ElevenLabs
-    honours "…" natively on both v2 and v3). Boundaries already followed by an
-    ellipsis or em-dash are left alone, and boundaries that fall inside a ``[…]``
-    delivery cue are never touched. Deterministic — no RNG.
-    """
-    # Mask bracket tags so a "." inside one is never treated as a boundary.
-    spans = [(m.start(), m.end()) for m in _BRACKET_SPAN_RE.finditer(text)]
-
-    def _in_span(pos: int) -> bool:
-        return any(start <= pos < end for start, end in spans)
-
-    def _repl(match: re.Match[str]) -> str:
-        if _in_span(match.start()):
-            return match.group(0)
-        return "… "
-
-    return _SENTENCE_BOUNDARY_RE.sub(_repl, text)
-
-
 def split_pauses(
     text: str, *, max_ms: int = 5000, default_ms: int = 1000,
 ) -> list[tuple[str, int]]:
@@ -134,9 +93,8 @@ def split_pauses(
     uses ``default_ms``. With no markers present the result is a single
     ``[(text, 0)]`` — callers can treat that as the no-op case.
 
-    The provider-agnostic splice path inserts a silence of ``pause_ms_after``
-    between consecutive segments; the ElevenLabs v2 path instead keeps the marker
-    inline and renders it as a native ``<break>`` (see the provider).
+    The orchestrator inserts a silence of ``pause_ms_after`` between consecutive
+    segments.
     """
     segments: list[tuple[str, int]] = []
     last = 0

@@ -45,10 +45,8 @@ _SFX_RE = re.compile(
 def _sfx_to_pauses(text: str) -> str:
     """Rewrite breath/SFX tags into equivalent ``[pause:N]`` markers.
 
-    Used for providers that can't *perform* an inline breath: the tag becomes a
-    short silence at the same point, so the timing beat still lands and no model
-    ever speaks the literal tag. Providers that can perform tags
-    (``accepts_inline_sfx``) skip this and keep the tag in the text.
+    The tag becomes a short silence at the same point, so the timing beat still
+    lands and no model ever speaks the literal tag.
     """
     return _SFX_RE.sub(lambda m: f"[pause:{sfx_pause_ms(m.group(1))}]", text)
 
@@ -98,7 +96,6 @@ def plan_turn(
     rng: random.Random,
     gap_min_ms: int,
     gap_max_ms: int,
-    inline_sfx: bool = False,
 ) -> list[PlanItem]:
     """Break one turn's ``text`` into an ordered list of speech + pause items.
 
@@ -106,16 +103,13 @@ def plan_turn(
     (drawn from ``rng``). ``max_chars`` is the provider's byte budget; overlong
     sentences are split via :func:`chunker.chunk_text`.
 
-    ``inline_sfx`` reflects the provider's ``accepts_inline_sfx`` capability: when
-    True, breath/SFX tags are left in the text for the model to perform; when
-    False (the default for current providers) they become short ``[pause:N]``
-    silences so the timing beat still lands.
+    Breath/SFX tags are rewritten to short ``[pause:N]`` silences so the timing
+    beat still lands without the model speaking the literal tag.
     """
     lo, hi = (gap_min_ms, gap_max_ms) if gap_min_ms <= gap_max_ms else (gap_max_ms, gap_min_ms)
     items: list[PlanItem] = []
 
-    if not inline_sfx:
-        text = _sfx_to_pauses(text)
+    text = _sfx_to_pauses(text)
 
     # Split on explicit [pause:N] tags: re.split keeps captured durations in the
     # odd positions (text, ms, text, ms, ...).

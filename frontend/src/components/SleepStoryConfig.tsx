@@ -1,5 +1,4 @@
 import {
-  ELEVENLABS_MODELS,
   type AmbientBed,
   type ProviderVoices,
 } from "../types";
@@ -11,7 +10,6 @@ interface Props {
   ambientBeds: AmbientBed[];
   provider: string;
   voiceId: string;
-  modelId: string;
   speed: number;
   pauseMs: number;
   ramp: boolean;
@@ -19,7 +17,6 @@ interface Props {
   proseText: string;
   onProviderChange: (provider: string) => void;
   onVoiceChange: (voiceId: string) => void;
-  onModelChange: (modelId: string) => void;
   onSpeedChange: (speed: number) => void;
   onPauseChange: (pauseMs: number) => void;
   onRampChange: (ramp: boolean) => void;
@@ -28,7 +25,6 @@ interface Props {
 }
 
 const PROVIDER_LABELS: Record<string, string> = {
-  elevenlabs: "ElevenLabs",
   kokoro: "Kokoro",
   f5: "F5",
 };
@@ -52,7 +48,6 @@ export function SleepStoryConfig({
   ambientBeds,
   provider,
   voiceId,
-  modelId,
   speed,
   pauseMs,
   ramp,
@@ -60,7 +55,6 @@ export function SleepStoryConfig({
   proseText,
   onProviderChange,
   onVoiceChange,
-  onModelChange,
   onSpeedChange,
   onPauseChange,
   onRampChange,
@@ -68,7 +62,6 @@ export function SleepStoryConfig({
   onProseChange,
 }: Props) {
   const group = providerVoices.find((p) => p.provider === provider);
-  const isElevenLabs = provider === "elevenlabs";
   const wordCount = proseText.trim() ? proseText.trim().split(/\s+/).length : 0;
 
   return (
@@ -98,22 +91,6 @@ export function SleepStoryConfig({
               ))}
             </select>
           </label>
-
-          {isElevenLabs && (
-            <label className="field">
-              <span className="field-label">Engine</span>
-              <select
-                value={modelId}
-                onChange={(e) => onModelChange(e.target.value)}
-              >
-                {ELEVENLABS_MODELS.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-          )}
 
           <label className="field">
             <span className="field-label">Voice</span>
