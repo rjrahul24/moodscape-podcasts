@@ -18,7 +18,7 @@ function formatBytes(bytes: number): string {
 }
 
 export function ResultPlayer({ result }: Props) {
-  // Prefer a playable format for the inline player (mp3/wav both work in browsers).
+  // Prefer a playable format for the inline player (m4a/wav both work in browsers).
   const playable = result.files[0];
 
   return (

@@ -2,8 +2,8 @@
 
 Each generation job gets its own directory under ``OUTPUT_DIR``:
 
+    output/<job_id>/episode.m4a
     output/<job_id>/episode.wav
-    output/<job_id>/episode.mp3
 """
 
 from __future__ import annotations
