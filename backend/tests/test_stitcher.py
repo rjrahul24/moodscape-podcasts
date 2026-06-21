@@ -82,11 +82,11 @@ def test_stitch_empty_returns_zero_length():
     assert len(stitch([], gap_ms=200)) == 0
 
 
-def test_export_master_writes_wav_and_mp3(tmp_path):
+def test_export_master_writes_m4a_and_wav(tmp_path):
     episode = AudioSegment.silent(duration=300)
     written = export_master(
-        episode, tmp_path, "episode", final_format="wav", also_export_mp3=True
+        episode, tmp_path, "episode", final_format="m4a", also_export_wav=True
     )
     names = sorted(p.name for p in written)
-    assert names == ["episode.mp3", "episode.wav"]
+    assert names == ["episode.m4a", "episode.wav"]
     assert all(p.is_file() and p.stat().st_size > 0 for p in written)

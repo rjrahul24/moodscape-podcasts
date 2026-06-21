@@ -367,9 +367,9 @@ def _finalize(
     out_dir: Path,
     *,
     final_format: str,
-    also_export_mp3: bool,
+    also_export_wav: bool,
 ) -> list[Path]:
-    """Move/transcode the concat master into ``out_dir`` as episode.<fmt> (+mp3)."""
+    """Move/transcode the concat master into ``out_dir`` as episode.<fmt> (+wav)."""
     out_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
 
@@ -380,10 +380,10 @@ def _finalize(
         ffmpeg_stitch.transcode(master_wav, master_path, final_format=final_format)
     written.append(master_path)
 
-    if also_export_mp3 and final_format != "mp3":
-        mp3_path = out_dir / f"{files.EPISODE_BASENAME}.mp3"
-        ffmpeg_stitch.transcode_mp3(master_path, mp3_path)
-        written.append(mp3_path)
+    if also_export_wav and final_format != "wav":
+        wav_path = out_dir / f"{files.EPISODE_BASENAME}.wav"
+        master_wav.replace(wav_path)
+        written.append(wav_path)
 
     return written
 
@@ -725,7 +725,7 @@ def _run_podcast(
         master,
         out_dir,
         final_format=settings.final_format,
-        also_export_mp3=settings.also_export_mp3,
+        also_export_wav=settings.also_export_wav,
     )
     shutil.rmtree(work_dir, ignore_errors=True)
 
@@ -935,7 +935,7 @@ def _run_sleep(
     else:
         final_wav = processed
 
-    written = _finalize(final_wav, out_dir, final_format="wav", also_export_mp3=True)
+    written = _finalize(final_wav, out_dir, final_format=settings.final_format, also_export_wav=settings.also_export_wav)
     shutil.rmtree(work_dir, ignore_errors=True)
 
     segment_infos = [

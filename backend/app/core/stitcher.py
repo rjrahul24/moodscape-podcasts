@@ -91,24 +91,27 @@ def export_master(
     out_dir: Path,
     base_name: str,
     *,
-    final_format: str = "wav",
-    also_export_mp3: bool = True,
+    final_format: str = "m4a",
+    also_export_wav: bool = True,
 ) -> list[Path]:
     """Write the episode to ``out_dir`` and return the created file paths.
 
-    Always writes ``<base_name>.<final_format>``; additionally writes an MP3
-    when ``also_export_mp3`` is set and the master is not already MP3.
+    Always writes ``<base_name>.<final_format>``; additionally writes a WAV
+    when ``also_export_wav`` is set and the master is not already WAV.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
 
     master_path = out_dir / f"{base_name}.{final_format}"
-    episode.export(master_path, format=final_format)
+    # pydub/ffmpeg needs "ipod" as the container format for .m4a files;
+    # the literal string "m4a" is not a recognised ffmpeg muxer.
+    pydub_fmt = "ipod" if final_format == "m4a" else final_format
+    episode.export(master_path, format=pydub_fmt)
     written.append(master_path)
 
-    if also_export_mp3 and final_format != "mp3":
-        mp3_path = out_dir / f"{base_name}.mp3"
-        episode.export(mp3_path, format="mp3", bitrate="320k")
-        written.append(mp3_path)
+    if also_export_wav and final_format != "wav":
+        wav_path = out_dir / f"{base_name}.wav"
+        episode.export(wav_path, format="wav")
+        written.append(wav_path)
 
     return written

@@ -20,7 +20,7 @@ def settings(tmp_path):
         output_dir=str(tmp_path),
         segment_output_format="wav_44100",
         final_format="wav",
-        also_export_mp3=False,
+        also_export_wav=False,
         inter_turn_gap_ms=100,
         ambient_dir=tmp_path / "ambient",
     )
@@ -358,7 +358,7 @@ def test_sleep_preroll_prepends_silence_when_ambient_bed_set(tmp_path, clean_reg
 
     settings = Settings(
         output_dir=str(tmp_path / "out"),
-        also_export_mp3=False,
+        also_export_wav=False,
         ambient_dir=ambient_dir,
         sleep_preroll_s=3.0,
     )
@@ -469,7 +469,7 @@ def test_sleep_ellipsis_injected_for_elevenlabs_when_enabled(tmp_path, clean_reg
     el = FakeProvider(name="elevenlabs", has_native_speed=True)
     clean_registry.register(el)
     settings = Settings(
-        output_dir=str(tmp_path), also_export_mp3=False,
+        output_dir=str(tmp_path), also_export_wav=False,
         sleep_sentence_ellipsis=True,
     )
     req = SleepStoryRequest(
@@ -505,7 +505,7 @@ def test_sleep_per_chunk_normalization_runs_for_long_chunks(tmp_path, clean_regi
         return real(in_wav, out_wav, **kw)
 
     monkeypatch.setattr(orchestrator.ffmpeg_stitch, "normalize_loudness", spy)
-    settings = Settings(output_dir=str(tmp_path), also_export_mp3=False)
+    settings = Settings(output_dir=str(tmp_path), also_export_wav=False)
     req = SleepStoryRequest(
         prose_text="The lake is still.", provider="elevenlabs",
         voice_id="rachel", model_id="eleven_v3", pause_ms=0,
@@ -524,7 +524,7 @@ def test_sleep_per_chunk_normalization_skips_short_chunks(tmp_path, clean_regist
         orchestrator.ffmpeg_stitch, "normalize_loudness",
         lambda *a, **k: calls.append(a) or a[1],
     )
-    settings = Settings(output_dir=str(tmp_path), also_export_mp3=False)
+    settings = Settings(output_dir=str(tmp_path), also_export_wav=False)
     req = SleepStoryRequest(
         prose_text="The lake is still.", provider="elevenlabs",
         voice_id="rachel", model_id="eleven_v3", pause_ms=0,

@@ -21,7 +21,7 @@ def client(tmp_path):
         output_dir=str(tmp_path),
         segment_output_format="wav_44100",
         final_format="wav",
-        also_export_mp3=False,
+        also_export_wav=False,
         inter_turn_gap_ms=50,
         ambient_dir=tmp_path / "ambient",
     )

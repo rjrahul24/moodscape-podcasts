@@ -25,7 +25,7 @@ def client(tmp_path):
         output_dir=str(tmp_path),
         segment_output_format="wav_44100",
         final_format="wav",
-        also_export_mp3=False,
+        also_export_wav=False,
         inter_turn_gap_ms=100,
         assets_dir=tmp_path / "assets",
         elevenlabs_api_key=None,

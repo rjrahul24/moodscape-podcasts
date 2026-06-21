@@ -83,8 +83,8 @@ class Settings(BaseSettings):
 
     # Audio
     segment_output_format: str = "mp3_44100_128"
-    final_format: str = "wav"
-    also_export_mp3: bool = True
+    final_format: str = "m4a"
+    also_export_wav: bool = True
     inter_turn_gap_ms: int = 400
     output_dir: str = "output"
 

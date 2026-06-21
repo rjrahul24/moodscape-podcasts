@@ -13,7 +13,7 @@ def _settings(tmp_path) -> Settings:
         output_dir=str(tmp_path),
         segment_output_format="wav_44100",
         final_format="wav",
-        also_export_mp3=False,
+        also_export_wav=False,
         inter_turn_gap_ms=100,
     )
 
