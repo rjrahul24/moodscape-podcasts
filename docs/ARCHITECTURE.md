@@ -68,7 +68,7 @@ app/
     orchestrator.py  the generation engine for both content types (run)
     qc.py            opt-in long-form QC: Whisper-WER + speaker-similarity (lazy)
     jobs.py          in-memory JobStore + ProgressReporter
-    ffmpeg_stitch.py disk-based stitch: chunk WAVs -> ffmpeg concat -> WAV/MP3
+    ffmpeg_stitch.py disk-based stitch: chunk WAVs -> ffmpeg concat -> M4A+WAV
     sleep_post.py    sleep-only ffmpeg filter chain (loudnorm/EQ/compress/fades)
     ambient.py       sleep-only ambient bed mix (loop/trim/gain/fade + amix)
     podcast_music.py intro/outro music mix (volume envelope + amix, mono)
@@ -403,7 +403,7 @@ ramped `pause_ms` silence between sentences and honors author `[pause:N]` breath
 stitch (see below) → concats to a raw narration WAV → `sleep_post.process` (ffmpeg:
 `acompressor` → `lowpass` → `loudnorm` EBU R128 at −18 LUFS / −2 dBTP → `afade`
 in/out → 44.1 kHz **stereo**) → if an ambient bed is chosen, `ambient.mix` softens
-and floats the bed under the voice (see below) → exports WAV + MP3. None of this
+and floats the bed under the voice (see below) → exports M4A + WAV. None of this
 touches the podcast path.
 
 **Engine tuning (ElevenLabs).** Both generations are first-class for sleep and
@@ -531,8 +531,8 @@ The legacy synchronous `POST /api/generate` remains (it adapts `GenerateRequest`
 
 Loaded from `backend/.env` (see `.env.example`). Highlights: `ELEVENLABS_API_KEY`,
 `ELEVENLABS_MODEL_ID`, `ELEVENLABS_PODCAST_MODEL`, `ELEVENLABS_SLEEP_MODEL`,
-`VOICE_CATALOG`, `SEGMENT_OUTPUT_FORMAT`, `FINAL_FORMAT`,
-`ALSO_EXPORT_MP3`, `INTER_TURN_GAP_MS`, `OUTPUT_DIR`, `TARGET_SAMPLE_RATE`,
+`VOICE_CATALOG`, `SEGMENT_OUTPUT_FORMAT`, `FINAL_FORMAT` (default `"m4a"`),
+`ALSO_EXPORT_WAV` (default `True`), `INTER_TURN_GAP_MS`, `OUTPUT_DIR`, `TARGET_SAMPLE_RATE`,
 `ASSETS_DIR`, `KOKORO_SPEED`, `F5_SPEED`, `F5_DEVICE`, `F5_DTYPE`, `F5_NFE_STEP`,
 `F5_CFG_STRENGTH`, `F5_SWAY_COEF`. **Chunking:** `KOKORO_CHUNK_CHARS`, `F5_CHUNK_CHARS`,
 `ELEVENLABS_CHUNK_CHARS`. **Podcast pacing:** `PODCAST_DEFAULT_SPEED`,

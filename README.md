@@ -32,7 +32,7 @@ out or exhaust memory).
 │ Frontend │ ────────────────────▶ │ FastAPI backend               │
 │ (React)  │   {job_id}            │  chunk → synth per chunk →     │
 │          │ ◀─ SSE progress ───── │  ffmpeg concat → (sleep:       │
-│          │ ◀── episode + files── │  loudnorm/EQ/ambient) → WAV/MP3│
+│          │ ◀── episode + files── │  loudnorm/EQ/ambient) → M4A+WAV│
 └──────────┘                       └───────────────────────────────┘
                                           │ TTSProvider (registry)
                                           ▼
@@ -114,7 +114,8 @@ Key `.env` settings:
 | `REFERENCE_CLIP_SAMPLE_RATE` / `REFERENCE_CLIP_MAX_SECONDS` | How uploaded reference clips are cleaned before cloning: target sample rate and the length cap (cloners need only a short window). |
 | `VOICE_CATALOG` | JSON list of voices for the dropdown, e.g. `[{"id":"...","label":"Rachel"}]`. Empty `[]` offers every voice on the account. |
 | `SEGMENT_OUTPUT_FORMAT` | Per-segment format requested from the provider. Best quality (Pro tier): `wav_44100`. Any tier: `mp3_44100_128`. |
-| `FINAL_FORMAT` | Master export format: `wav` (lossless) or `mp3`. |
+| `FINAL_FORMAT` | Master export format: `m4a` (AAC-LC, 256 kbps, default) or `wav` (lossless). |
+| `ALSO_EXPORT_WAV` | If `true` (default), export a lossless WAV backup alongside the M4A master. |
 | `INTER_TURN_GAP_MS` | Silence between speaker turns (podcasts). |
 | `CHUNK_EDGE_FADE_MS` | Short edge fade applied to each chunk WAV to remove concat-boundary clicks (default `8`; `0` disables). |
 | `KOKORO_CHUNK_CHARS` / `F5_CHUNK_CHARS` / `ELEVENLABS_CHUNK_CHARS` | Max characters per synthesis chunk (keeps Kokoro under its token cap, F5 under ~30s). |
@@ -258,9 +259,10 @@ paste-ready script. See [the index](docs/prompting_guides/README.md).
 
 Each chunk is rendered in the configured `SEGMENT_OUTPUT_FORMAT` (use lossless
 `wav_44100` on a Pro+ account for best results), written to disk, and stitched
-with the ffmpeg concat demuxer (constant memory) into a **WAV master** plus an
-optional **MP3 320** for sharing. Sleep stories add a calming master and export
-44.1 kHz stereo. (MP4 is a video container and isn't used for audio-only output.)
+with the ffmpeg concat demuxer (constant memory) into an **M4A master** (AAC-LC,
+256 kbps, `-movflags +faststart` for instant mobile playback) plus an optional
+lossless **WAV backup** for archival. Sleep stories add a calming master and
+export 44.1 kHz stereo.
 
 ## Adding a new TTS provider
 

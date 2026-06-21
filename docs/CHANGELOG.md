@@ -3,6 +3,19 @@
 Append-only log of notable changes and the decisions behind them. Newest first.
 Every change should add an entry (see `CLAUDE.md` → Documentation discipline).
 
+## 2026-06-21 — M4A default export
+
+- **Changed** default output from WAV + MP3 to M4A + WAV.
+- **Added** `transcode_m4a()` in `ffmpeg_stitch.py` — AAC-LC at 256 kbps with
+  `-movflags +faststart` for instant iPhone playback.
+- **Replaced** `also_export_mp3` config with `also_export_wav`.
+- **Why:** WAV files are too large for transfer/playback on mobile. M4A (AAC-LC)
+  is the native iPhone codec, ~5x smaller than WAV at transparent quality. The
+  generation pipeline stays lossless (WAV) throughout; conversion happens only at
+  the final export step.
+
+---
+
 ## 2026-06-20 — Sleep UX: bare [pause] support + ambient pre-roll
 
 **What changed** (sleep stories only; podcasts untouched):
