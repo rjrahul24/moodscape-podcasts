@@ -143,9 +143,27 @@ def transcode_mp3(in_wav: Path, out_mp3: Path, *, bitrate: str = "320k") -> Path
     return out_mp3
 
 
+def transcode_m4a(in_wav: Path, out_m4a: Path, *, bitrate: str = "256k") -> Path:
+    """Transcode a WAV master to M4A (AAC-LC).
+
+    ``-movflags +faststart`` relocates the moov atom so iPhone apps can begin
+    playback immediately without buffering the entire file.
+    """
+    run_ffmpeg([
+        "-i", str(in_wav.resolve()),
+        "-c:a", "aac",
+        "-b:a", bitrate,
+        "-movflags", "+faststart",
+        str(out_m4a.resolve()),
+    ])
+    return out_m4a
+
+
 def transcode(in_path: Path, out_path: Path, *, final_format: str) -> Path:
-    """Transcode ``in_path`` to ``out_path`` in ``final_format`` (wav/mp3/...)."""
+    """Transcode ``in_path`` to ``out_path`` in ``final_format`` (wav/mp3/m4a/...)."""
     if final_format == "mp3":
         return transcode_mp3(in_path, out_path)
+    if final_format == "m4a":
+        return transcode_m4a(in_path, out_path)
     run_ffmpeg(["-i", str(in_path.resolve()), str(out_path.resolve())])
     return out_path

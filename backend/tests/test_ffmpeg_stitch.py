@@ -71,3 +71,10 @@ def test_transcode_mp3(tmp_path):
     wav = ffmpeg_stitch.silence_wav(tmp_path / "a.wav", duration_ms=300, sample_rate=44100)
     mp3 = ffmpeg_stitch.transcode_mp3(wav, tmp_path / "a.mp3")
     assert mp3.exists() and mp3.stat().st_size > 0
+
+
+@needs_ffmpeg
+def test_transcode_m4a(tmp_path):
+    wav = ffmpeg_stitch.silence_wav(tmp_path / "a.wav", duration_ms=300, sample_rate=44100)
+    m4a = ffmpeg_stitch.transcode_m4a(wav, tmp_path / "a.m4a")
+    assert m4a.exists() and m4a.stat().st_size > 0
